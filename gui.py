@@ -185,7 +185,7 @@ class App(ctk.CTk):
         
         ctk.CTkLabel(row1, text="Provider:", font=("Segoe UI", 14), text_color=TEXT_P).pack(side="left")
         self.provider_var = ctk.StringVar(value="gemini")
-        self.opt_provider = ctk.CTkOptionMenu(row1, values=["gemini", "jev", "groq", "openrouter", "mistral"], variable=self.provider_var, fg_color=BG, button_color=HOVER, width=120, command=self._on_provider_change)
+        self.opt_provider = ctk.CTkOptionMenu(row1, values=["gemini", "jev", "groq", "openrouter", "mistral", "xai", "openai"], variable=self.provider_var, fg_color=BG, button_color=HOVER, width=120, command=self._on_provider_change)
         self.opt_provider.pack(side="left", padx=10)
         
         self.lbl_api = ctk.CTkLabel(row1, text="API Key:", font=("Segoe UI", 14), text_color=TEXT_P)
@@ -404,10 +404,12 @@ class App(ctk.CTk):
             self.entry_api.configure(state="normal", placeholder_text="Nhập API Key...")
             self.lbl_api.configure(text="API Key:")
         notes = {
-            "gemini": "🔗 generativelanguage.googleapis.com | Khuyên dùng model: gemini-1.5-flash",
+            "gemini": "🔗 generativelanguage.googleapis.com | Khuyên dùng: gemini-3.8-flash (FREE)",
             "groq": "🔗 api.groq.com | Lấy key tại console.groq.com",
             "openrouter": "🔗 openrouter.ai | Key bắt đầu bằng 'sk-or-...'",
             "mistral": "🔗 api.mistral.ai | Key lấy từ console.mistral.ai",
+            "xai": "🔗 api.x.ai | Key bắt đầu 'xai-' | Grok (trả phí)",
+            "openai": "🔗 api.openai.com | Key bắt đầu 'sk-' | GPT (trả phí)",
             "jev": "🔗 classifier.dev | Miễn phí, độ chính xác thấp, không cần API Key"
         }
         if hasattr(self, 'lbl_provider_note'): self.lbl_provider_note.configure(text=notes.get(choice, ""))
@@ -526,6 +528,9 @@ class App(ctk.CTk):
         if use_api:
             valid_keys = [k for k in self.ai_config if k.get("valid") and k.get("provider") != "jev"]
             if not valid_keys: return messagebox.showerror("Lỗi", "Không có API Key hợp lệ nào.")
+            # Ưu tiên FREE: groq > gemini > openrouter > mistral > (paid) xai/openai
+            _prio = {"groq": 0, "gemini": 1, "openrouter": 2, "mistral": 3, "jev": 4, "xai": 10, "openai": 11}
+            valid_keys.sort(key=lambda k: _prio.get(k.get("provider", ""), 50))
             chosen_config = valid_keys[0]
         else:
             chosen_config = {"provider": "jev", "api_key": "", "model": "jev-classifier", "used_today": 0}
