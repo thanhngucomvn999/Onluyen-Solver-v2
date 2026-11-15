@@ -48,10 +48,13 @@ def clean_html(raw_html: str) -> str:
     raw_html = re.sub(r'</p>', '\n', raw_html, flags=re.IGNORECASE)
     text = re.sub(r"<[^>]+>", " ", raw_html)
     text = html.unescape(text)
-    text = text.replace("\\left", "").replace("\\right", "")
-    text = text.replace("\\{", "{").replace("\\}", "}")
-    text = re.sub(r'\\frac\{([^}]+)\}\{([^}]+)\}', r'(\1)/(\2)', text)
-    text = re.sub(r'\\sqrt\{([^}]+)\}', r'√(\1)', text)
+    
+    text = re.sub(r'\\+left|\\+right', '', text)
+    text = re.sub(r'\\+{', '{', text)
+    text = re.sub(r'\\+}', '}', text)
+    text = re.sub(r'\\+frac\{([^}]+)\}\{([^}]+)\}', r'(\1)/(\2)', text)
+    text = re.sub(r'\\+sqrt\{([^}]+)\}', r'√(\1)', text)
+    
     return re.sub(r'\s+', ' ', text).strip()
 
 class OnluyenAPI:
@@ -84,7 +87,11 @@ class OnluyenAPI:
             "school-year": self.school_year,
             "user-id": self.user_id,
             "user-name": self.username,
-            "content-type": "application/json"
+            "content-type": "application/json",
+            # Thêm headers viết liền theo tool_onluyen
+            "schoolyear": self.school_year,
+            "schoolid": self.school_id,
+            "userid": self.user_id
         })
 
     def _save_session(self):
@@ -192,22 +199,39 @@ class OnluyenAPI:
 
     def get_questions(self, assign_id: str) -> List[Question]:
         self.session.post(f"{self.BASE_API}/school-online/assignment/start/{assign_id}", json={}, timeout=15)
-        resp = self.session.get(f"{self.BASE_API}/school-online/assignment/doing/{assign_id}", timeout=20)
-        if resp.status_code == 401: raise SessionExpiredError()
         
-        data = resp.json().get("data", {})
-        if not data: raise Exception("Không thể tải đề bài. Bài đã nộp hoặc lỗi API.")
+        # 1. Thử lấy từ doing
+        url_doing = f"{self.BASE_API}/school-online/assignment/doing/{assign_id}"
+        res = self.session.get(url_doing, timeout=20)
+        if res.status_code == 401: raise SessionExpiredError()
         
+        data = None
+        if res.status_code == 200:
+            data = res.json().get("data")
+            
+        # 2. Fallback lấy từ detail
+        if not data:
+            url_detail = f"{self.BASE_API}/school-online/assignment/detail/{assign_id}"
+            res_detail = self.session.get(url_detail, timeout=20)
+            if res_detail.status_code == 200:
+                data = res_detail.json().get("data")
+                
+        if not data:
+            raise Exception("Không thể tải đề bài. Bài đã nộp hoặc lỗi API.")
+            
         self.put_url = data.get("preSignedUrlAnswer", "")
         raw_qs = data.get("data", [])
         
         questions = []
-        idx = 1
-        for q in raw_qs:
-            std = q.get("dataStandard")
-            if not std: continue
+        # Copy y nguyên vòng lặp của tool_onluyen.py (Không có lệnh continue)
+        for idx, item in enumerate(raw_qs):
+            std = item.get("dataStandard", {})
             vi = std.get("languagesData", {}).get("vi", {})
+            
+            step_id = std.get("stepId")  # Có thể là 0
             ta = std.get("typeAnswer", 0)
+            content = clean_html(vi.get("content", ""))
+            
             qtype = "true_false" if ta == 1 else ("text" if ta in (3, 5) else "choice")
             
             opts = []
@@ -215,10 +239,10 @@ class OnluyenAPI:
                 opts.append({"id": o.get("idOption"), "text": clean_html(o.get("content", ""))})
                 
             questions.append(Question(
-                id=std.get("stepId"), index=idx,
-                content=vi.get("content", ""), qtype=qtype, options=opts
+                id=step_id, index=idx+1,
+                content=content, qtype=qtype, options=opts
             ))
-            idx += 1
+            
         return questions
 
     def upload_answers(self, assign_id: str, payloads: List[Dict]) -> bool:
@@ -238,7 +262,12 @@ class OnluyenAPI:
                 item["optionText"] = [p.get("text", "")]
             s3_payload.append(item)
             
-        resp = requests.put(self.put_url, json=s3_payload, headers={"Content-Type": "application/json"}, timeout=20)
+        headers = {
+            "Content-Type": "application/json",
+            "Origin": "https://app.onluyen.vn",
+            "Referer": "https://app.onluyen.vn/"
+        }
+        resp = requests.put(self.put_url, data=json.dumps(s3_payload, ensure_ascii=False), headers=headers, timeout=20)
         return resp.status_code in (200, 204)
 
     def submit(self, assign_id: str) -> Dict:

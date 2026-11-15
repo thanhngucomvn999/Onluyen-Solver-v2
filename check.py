@@ -50,7 +50,10 @@ def check_api(provider, api_key):
 
     try:
         print("[1/2] Lấy danh sách model...")
-        r = requests.get(cfg["models_url"], headers=cfg["headers"], timeout=30)
+        r = requests.get(cfg["models_url"], headers=cfg["headers"], timeout=60)
+        if r.status_code in (401, 403):
+            print(f"   [X] HTTP {r.status_code}: Key bị từ chối.")
+            return
         if r.status_code != 200:
             print(f"   [X] HTTP {r.status_code}: {r.text[:200]}")
             return
@@ -60,24 +63,27 @@ def check_api(provider, api_key):
             models = [m["id"] for m in r.json().get("data", [])]
         print(f"   [OK] {len(models)} model. 5 đầu: {', '.join(models[:5])}")
     except requests.exceptions.Timeout:
-        print("   [X] Timeout 30s."); return
+        print("   [X] Timeout 60s (mạng chậm hoặc key bị chặn)."); return
     except Exception as e:
         print(f"   [X] {e}"); return
 
     try:
         print("\n[2/2] Ping chat...")
-        r = requests.post(cfg["chat_url"], headers=cfg["headers"], json=cfg["payload"], timeout=30)
+        r = requests.post(cfg["chat_url"], headers=cfg["headers"], json=cfg["payload"], timeout=60)
         if r.status_code == 200: print("   [OK] Chat thành công.")
         elif r.status_code == 429: print("   [!] Hết rate limit (429).")
         elif r.status_code == 402: print("   [!] Hết tiền (402).")
+        elif r.status_code in (401, 403): print(f"   [X] HTTP {r.status_code}: Key bị từ chối.")
         else: print(f"   [X] HTTP {r.status_code}: {r.text[:200]}")
+    except requests.exceptions.Timeout:
+        print("   [X] Timeout 60s khi gọi chat.")
     except Exception as e:
         print(f"   [X] Lỗi mạng: {e}")
 
 
 if __name__ == "__main__":
     print("=" * 50)
-    print(" KIỂM TRA API KEY ONLUYEN (15/11/2026)")
+    print(" KIỂM TRA API KEY ONLUYEN (15/11/2026 — v6.1)")
     print("=" * 50)
     print("Hỗ trợ: gemini, groq, xai, openai, openrouter, mistral")
     p = input("\nProvider: ").strip()
