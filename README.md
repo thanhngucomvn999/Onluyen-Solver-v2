@@ -32,9 +32,10 @@
 
 ## 📸 Hình ảnh minh họa
 
-*(Bạn hãy chụp màn hình app của bạn, kéo thả ảnh vào đây để hiển thị lên GitHub nhé)*
+**
 > *Ví dụ:*
-> `![Giao diện chính](link_anh_cua_ban.png)`
+<img width="1364" height="731" alt="image" src="https://github.com/user-attachments/assets/8a0b07e0-c5e3-4846-9fe3-a114f4546ee6" />
+
 
 ## 🛠️ Hướng dẫn cài đặt
 
