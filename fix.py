@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-FIX V4.0 - Nâng cấp Solver: Cải thiện độ chính xác Trả lời ngắn, tự động đổi dấu chấm thành dấu phẩy.
-Tự động ghi đè solver.py và gui.py.
+FIX v6.7 — Đồng bộ 100% logic API từ tool_onluyen.py.
+- Thêm fallback API /detail/ nếu /doing/ lỗi.
+- Bỏ lệnh skip câu hỏi rỗng (khắc phục lỗi 30/31 câu).
+- Giữ nguyên giao diện GUI.
 """
 
 from pathlib import Path
@@ -11,7 +13,290 @@ BASE_DIR = Path(__file__).resolve().parent
 FILES = {}
 
 # ============================================================
-# 1. solver.py (Nâng cấp Prompt và Xử lý dấu phẩy)
+# 1. onluyen_api.py — COPY NGUYÊN LOGIC TỪ TOOL_ONLUYEN.PY
+# ============================================================
+FILES["onluyen_api.py"] = r'''import re
+import json
+import base64
+import hashlib
+import os
+import time
+import html
+from typing import List, Optional, Dict, Any
+import requests
+from models import Assignment, Question
+
+SESSION_FILE = ".onluyen_session.json"
+ACCOUNTS_FILE = ".onluyen_accounts.json"
+DEFAULT_USER_AGENT = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36"
+
+class SessionExpiredError(Exception):
+    pass
+
+def _process_img_tag(match) -> str:
+    src = match.group(1).strip()
+    if src.startswith("data:image"):
+        try:
+            parts = src.split(",", 1)
+            if len(parts) == 2:
+                header, b64data = parts
+                ext = "png"
+                if "image/jpeg" in header: ext = "jpg"
+                elif "image/webp" in header: ext = "webp"
+                elif "image/gif" in header: ext = "gif"
+
+                raw_bytes = base64.b64decode(b64data)
+                h = hashlib.md5(raw_bytes).hexdigest()[:12]
+                cache_dir = os.path.join(os.getcwd(), "images_cache")
+                os.makedirs(cache_dir, exist_ok=True)
+                img_path = os.path.join(cache_dir, f"{h}.{ext}")
+                if not os.path.exists(img_path):
+                    with open(img_path, "wb") as f:
+                        f.write(raw_bytes)
+                return f" ![Hình ảnh]({img_path}) "
+        except Exception:
+            return " [Hình ảnh lỗi] "
+    return f" ![Hình ảnh]({src}) "
+
+def clean_html(raw_html: str) -> str:
+    if not raw_html: return ""
+    raw_html = re.sub(r'<img[^>]+src=["\']([^"\']+)["\'][^>]*>', _process_img_tag, raw_html)
+    raw_html = re.sub(r'<br\s*/?>', '\n', raw_html, flags=re.IGNORECASE)
+    raw_html = re.sub(r'</p>', '\n', raw_html, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", raw_html)
+    text = html.unescape(text)
+    
+    text = re.sub(r'\\+left|\\+right', '', text)
+    text = re.sub(r'\\+{', '{', text)
+    text = re.sub(r'\\+}', '}', text)
+    text = re.sub(r'\\+frac\{([^}]+)\}\{([^}]+)\}', r'(\1)/(\2)', text)
+    text = re.sub(r'\\+sqrt\{([^}]+)\}', r'√(\1)', text)
+    
+    return re.sub(r'\s+', ' ', text).strip()
+
+class OnluyenAPI:
+    LOGIN_URL = "https://oauth.onluyen.vn/api/account/login"
+    BASE_API = "https://api-elb.onluyen.vn/api"
+
+    def __init__(self):
+        self.username = ""
+        self.password = ""
+        self.token = ""
+        self.user_id = ""
+        self.display_name = ""
+        self.email = ""
+        self.school_id = "648"
+        self.school_year = "2026"
+        self.code_app = "SCHOOL"
+        self.session = requests.Session()
+        self.session.headers.update({
+            "accept": "application/json, text/plain, */*",
+            "origin": "https://app.onluyen.vn",
+            "referer": "https://app.onluyen.vn/",
+            "user-agent": DEFAULT_USER_AGENT
+        })
+
+    def _apply_headers(self):
+        self.session.headers.update({
+            "authorization": f"Bearer {self.token}",
+            "code-app": self.code_app,
+            "school-id": self.school_id,
+            "school-year": self.school_year,
+            "user-id": self.user_id,
+            "user-name": self.username,
+            "content-type": "application/json",
+            # Thêm headers viết liền theo tool_onluyen
+            "schoolyear": self.school_year,
+            "schoolid": self.school_id,
+            "userid": self.user_id
+        })
+
+    def _save_session(self):
+        try:
+            with open(SESSION_FILE, "w", encoding="utf-8") as f:
+                json.dump({
+                    "token": self.token, "user_id": self.user_id, 
+                    "email": self.email, "display_name": self.display_name,
+                    "school_id": self.school_id, "school_year": self.school_year
+                }, f)
+        except Exception: pass
+
+    def auto_login(self) -> bool:
+        if not os.path.exists(SESSION_FILE): return False
+        try:
+            with open(SESSION_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                self.token = data.get("token", "")
+                self.user_id = data.get("user_id", "")
+                self.email = data.get("email", "")
+                self.display_name = data.get("display_name", "")
+                self.username = self.email
+                self.school_id = data.get("school_id", self.school_id)
+                self.school_year = data.get("school_year", self.school_year)
+                
+            payload_part = self.token.split(".")[1]
+            payload_part += "=" * ((4 - len(payload_part) % 4) % 4)
+            jwt_data = json.loads(base64.urlsafe_b64decode(payload_part.encode()).decode("utf-8"))
+            if jwt_data.get("exp", 0) > time.time() + 300:
+                self._apply_headers()
+                return True
+        except Exception:
+            pass
+        return False
+
+    def login(self, username: str, password: str):
+        payload = {"userName": username, "password": password, "codeApp": self.code_app}
+        resp = self.session.post(self.LOGIN_URL, json=payload, timeout=15)
+        if resp.status_code != 200:
+            raise Exception("Đăng nhập thất bại. Sai tài khoản hoặc mật khẩu.")
+            
+        data = resp.json()
+        self.token = data.get("access_token", "")
+        if not self.token: raise Exception("Không lấy được token.")
+        
+        self.username = username
+        self.email = username
+        self.password = password
+        
+        try:
+            payload_part = self.token.split(".")[1]
+            payload_part += "=" * ((4 - len(payload_part) % 4) % 4)
+            jwt_data = json.loads(base64.urlsafe_b64decode(payload_part.encode()).decode("utf-8"))
+            self.user_id = jwt_data.get("userId", "")
+            self.display_name = jwt_data.get("DisplayName", "")
+            self.school_id = str(jwt_data.get("CreateBySchool", self.school_id))
+        except Exception: pass
+
+        self._apply_headers()
+        self._save_session()
+        self._save_account(username, password)
+
+    def _save_account(self, username, password):
+        accounts = self.get_saved_accounts()
+        for acc in accounts:
+            if acc["username"] == username: return
+        accounts.append({
+            "username": username, 
+            "password": base64.b64encode(password.encode()).decode(),
+            "display_name": self.display_name or username
+        })
+        with open(ACCOUNTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(accounts, f, ensure_ascii=False, indent=2)
+
+    def get_saved_accounts(self) -> List[Dict]:
+        if os.path.exists(ACCOUNTS_FILE):
+            try:
+                with open(ACCOUNTS_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception: pass
+        return []
+
+    def logout(self):
+        self.token = ""
+        if os.path.exists(SESSION_FILE): os.remove(SESSION_FILE)
+
+    def get_assignments(self, filter_status="all") -> List[Assignment]:
+        url = f"{self.BASE_API}/school-online/assignment/assign-student-suggest?pageIndex=1&pageSize=50"
+        resp = self.session.get(url, timeout=15)
+        if resp.status_code == 401: raise SessionExpiredError()
+        if resp.status_code != 200: return []
+
+        items = resp.json().get("data", [])
+        results = []
+        for it in items:
+            st = it.get("status")
+            if filter_status == "todo" and st not in (0, 1): continue
+            if filter_status == "done" and st not in (2, 3): continue
+            results.append(Assignment(
+                assign_id=it.get("assignId"), title=it.get("name"),
+                subject=it.get("className", "Môn học"), status=st,
+                completed=st in (2,3), score=it.get("score")
+            ))
+        return results
+
+    def get_questions(self, assign_id: str) -> List[Question]:
+        self.session.post(f"{self.BASE_API}/school-online/assignment/start/{assign_id}", json={}, timeout=15)
+        
+        # 1. Thử lấy từ doing
+        url_doing = f"{self.BASE_API}/school-online/assignment/doing/{assign_id}"
+        res = self.session.get(url_doing, timeout=20)
+        if res.status_code == 401: raise SessionExpiredError()
+        
+        data = None
+        if res.status_code == 200:
+            data = res.json().get("data")
+            
+        # 2. Fallback lấy từ detail
+        if not data:
+            url_detail = f"{self.BASE_API}/school-online/assignment/detail/{assign_id}"
+            res_detail = self.session.get(url_detail, timeout=20)
+            if res_detail.status_code == 200:
+                data = res_detail.json().get("data")
+                
+        if not data:
+            raise Exception("Không thể tải đề bài. Bài đã nộp hoặc lỗi API.")
+            
+        self.put_url = data.get("preSignedUrlAnswer", "")
+        raw_qs = data.get("data", [])
+        
+        questions = []
+        # Copy y nguyên vòng lặp của tool_onluyen.py (Không có lệnh continue)
+        for idx, item in enumerate(raw_qs):
+            std = item.get("dataStandard", {})
+            vi = std.get("languagesData", {}).get("vi", {})
+            
+            step_id = std.get("stepId")  # Có thể là 0
+            ta = std.get("typeAnswer", 0)
+            content = clean_html(vi.get("content", ""))
+            
+            qtype = "true_false" if ta == 1 else ("text" if ta in (3, 5) else "choice")
+            
+            opts = []
+            for o in vi.get("options", []):
+                opts.append({"id": o.get("idOption"), "text": clean_html(o.get("content", ""))})
+                
+            questions.append(Question(
+                id=step_id, index=idx+1,
+                content=content, qtype=qtype, options=opts
+            ))
+            
+        return questions
+
+    def upload_answers(self, assign_id: str, payloads: List[Dict]) -> bool:
+        if not getattr(self, 'put_url', ""): return False
+        s3_payload = []
+        now = int(time.time())
+        for p in payloads:
+            item = {"id": p["stepId"], "isSkip": False, "studentDoRight": None, "timeUpdate": now, "lang": "vi"}
+            if p["type"] == "choice":
+                item["optionId"] = [p.get("optionId")]
+                item["optionText"] = []
+            elif p["type"] == "true_false":
+                item["optionId"] = []
+                item["optionText"] = p.get("choices", [])
+            else:
+                item["optionId"] = []
+                item["optionText"] = [p.get("text", "")]
+            s3_payload.append(item)
+            
+        headers = {
+            "Content-Type": "application/json",
+            "Origin": "https://app.onluyen.vn",
+            "Referer": "https://app.onluyen.vn/"
+        }
+        resp = requests.put(self.put_url, data=json.dumps(s3_payload, ensure_ascii=False), headers=headers, timeout=20)
+        return resp.status_code in (200, 204)
+
+    def submit(self, assign_id: str) -> Dict:
+        url = f"{self.BASE_API}/school-online/assignment/submit/{assign_id}"
+        resp = self.session.put(url, json={}, timeout=15)
+        if resp.status_code == 200:
+            return {"success": True, "message": "Nộp bài thành công"}
+        return {"success": False, "message": f"HTTP {resp.status_code}: {resp.text}"}
+'''
+
+# ============================================================
+# 2. solver.py — CHỐNG LỖI VÀ ĐÁP ÁN RÁC
 # ============================================================
 FILES["solver.py"] = r'''import re
 import json
@@ -26,17 +311,38 @@ def clean_display_text(text: str) -> str:
     if not text: return ""
     return re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', text)).strip()
 
-# Bóc tách JSON an toàn
 def safe_parse_json(text: str) -> dict:
     try:
-        match = re.search(r'\{[\s\S]*\}', text)
-        if match:
-            return json.loads(match.group(0))
-    except Exception:
-        pass
+        m = re.search(r'\{[\s\S]*\}', text)
+        if m: return json.loads(m.group(0))
+    except Exception: pass
     return {}
 
 class AISolver:
+    _OPENAI_COMPAT_URLS = {
+        "groq":       "https://api.groq.com/openai/v1/chat/completions",
+        "openrouter": "https://openrouter.ai/api/v1/chat/completions",
+        "mistral":    "https://api.mistral.ai/v1/chat/completions",
+        "xai":        "https://api.x.ai/v1/chat/completions",
+        "openai":     "https://api.openai.com/v1/chat/completions",
+    }
+    _MODELS_URLS = {
+        "groq":       "https://api.groq.com/openai/v1/models",
+        "openrouter": "https://openrouter.ai/api/v1/models",
+        "mistral":    "https://api.mistral.ai/v1/models",
+        "xai":        "https://api.x.ai/v1/models",
+        "openai":     "https://api.openai.com/v1/models",
+    }
+    _LIMITS = {
+        "gemini":     {"rpm": 15,  "rpd": 1500,  "free": True},
+        "groq":       {"rpm": 30,  "rpd": 1000,  "free": True},
+        "openrouter": {"rpm": 20,  "rpd": 50,    "free": True},
+        "mistral":    {"rpm": 60,  "rpd": 1000,  "free": True},
+        "jev":        {"rpm": 100, "rpd": 10000, "free": True},
+        "xai":        {"rpm": 60,  "rpd": 1000,  "free": False},
+        "openai":     {"rpm": 60,  "rpd": 10000, "free": False},
+    }
+
     def __init__(self, provider: str, api_key: str, model: str = "", rpd_limit: int = 1500):
         self.provider = provider.lower()
         self.api_key = api_key
@@ -44,53 +350,86 @@ class AISolver:
         self.used_today = 0
         self.rpd_limit = rpd_limit
         self._session = requests.Session()
-        self._session.headers.update({"User-Agent": "Onluyen-Solver/4.0"})
+        self._session.headers.update({"User-Agent": "Onluyen-Solver/6.7"})
 
     def _get_default_model(self) -> str:
-        defaults = {
-            "gemini": "gemini-1.5-flash", 
-            "groq": "llama-3.1-8b-instant",
-            "openrouter": "google/gemma-2-9b-it:free",
-            "mistral": "open-mistral-nemo",
-            "jev": "jev-classifier"
-        }
-        return defaults.get(self.provider, "")
+        return {
+            "gemini":     "gemini-3.8-flash",
+            "groq":       "qwen/qwen3.8-27b",
+            "openrouter": "openrouter/free",
+            "mistral":    "mistral-small-latest",
+            "xai":        "grok-4.7",
+            "openai":     "gpt-4.1-mini",
+            "jev":        "jev-classifier",
+        }.get(self.provider, "")
 
     def fetch_models_and_limits(self) -> Dict[str, Any]:
         if self.provider == "jev":
-            return {"models": ["jev-classifier"], "limits": {"rpm": 100, "rpd": 10000}}
-        try:
-            if self.provider == "gemini":
-                url = f"https://generativelanguage.googleapis.com/v1beta/models?key={self.api_key}"
-                resp = self._session.get(url, timeout=10)
-                if resp.status_code != 200: return {"error": f"HTTP {resp.status_code}: Key không hợp lệ"}
-                models = []
-                for m in resp.json().get("models", []):
-                    name = m.get("name", "").replace("models/", "")
-                    if "flash" in name and "tts" not in name and "vision" not in name:
-                        models.append(name)
-                models.sort(key=lambda x: 100 if "3.8" in x else (90 if "2.5" in x else 0), reverse=True)
-                return {"models": models[:15], "limits": {"rpm": 15, "rpd": 1500}}
-            return {"models": [], "limits": {"rpm": 10, "rpd": 1000}}
-        except Exception as e:
-            return {"error": str(e)}
+            return {"models": ["jev-classifier"], "limits": self._LIMITS["jev"]}
+        for attempt in range(3):
+            try:
+                if self.provider == "gemini":
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={self.api_key}"
+                    r = self._session.get(url, timeout=25)
+                    if r.status_code in (401, 403): return {"error": f"HTTP {r.status_code}: Key bị từ chối"}
+                    if r.status_code != 200: return {"error": f"HTTP {r.status_code}: {r.text[:120]}"}
+                    models = []
+                    for m in r.json().get("models", []):
+                        name = m.get("name", "").replace("models/", "")
+                        if "flash" in name and "tts" not in name and "vision" not in name:
+                            models.append(name)
+                    models.sort(key=lambda x: 150 if "3.8" in x else (100 if "3.1" in x else 0), reverse=True)
+                    return {"models": models[:15], "limits": self._LIMITS["gemini"]}
 
-    def check_quota(self) -> tuple[bool, str]:
+                url = self._MODELS_URLS.get(self.provider)
+                if not url: return {"error": f"Provider {self.provider} không hỗ trợ."}
+                r = self._session.get(url, headers={"Authorization": f"Bearer {self.api_key}"}, timeout=25)
+                if r.status_code in (401, 403): return {"error": f"HTTP {r.status_code}: Key bị từ chối"}
+                if r.status_code != 200: return {"error": f"HTTP {r.status_code}: {r.text[:120]}"}
+                models = [m["id"] for m in r.json().get("data", [])]
+                return {"models": models[:20], "limits": self._LIMITS.get(self.provider, {"rpm": 10, "rpd": 1000})}
+            except requests.exceptions.RequestException as e:
+                if attempt < 2: time.sleep(1.5 * (attempt + 1)); continue
+                return {"error": f"Timeout/Network: {str(e)[:150]}"}
+            except Exception as e:
+                return {"error": str(e)}
+        return {"error": "Không thể kết nối"}
+
+    def check_quota(self) -> tuple:
         try:
             if self.provider == "jev": return True, "Sẵn sàng"
+            if self.provider == "gemini":
+                model = self.model or self._get_default_model()
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={self.api_key}"
+                r = self._session.post(url, json={"contents": [{"parts": [{"text": "1"}]}], "generationConfig": {"maxOutputTokens": 1}}, timeout=25)
+                if r.status_code == 200: return True, "Sẵn sàng"
+                if r.status_code in (401, 403): return False, f"Key bị từ chối (HTTP {r.status_code})"
+                if r.status_code == 404:
+                    info = self.fetch_models_and_limits()
+                    if info.get("models"):
+                        self.model = info["models"][0]
+                        return True, f"Đã tự động chuyển sang {self.model}"
+                    return False, "Model không tồn tại."
+                return False, f"Lỗi HTTP {r.status_code}"
+
+            url = self._OPENAI_COMPAT_URLS.get(self.provider)
+            if not url: return False, "Provider chưa hỗ trợ."
             model = self.model or self._get_default_model()
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={self.api_key}"
-            payload = {"contents": [{"parts": [{"text": "1"}]}], "generationConfig": {"maxOutputTokens": 1}}
-            resp = self._session.post(url, json=payload, timeout=10)
-            if resp.status_code == 200: return True, "Sẵn sàng"
-            elif resp.status_code == 404:
-                models_info = self.fetch_models_and_limits()
-                if models_info.get("models"):
-                    self.model = models_info["models"][0]
+            r = self._session.post(url, headers={"Authorization": f"Bearer {self.api_key}"}, json={"model": model, "messages": [{"role": "user", "content": "1"}], "max_tokens": 1}, timeout=25)
+            if r.status_code == 200: return True, "Sẵn sàng"
+            if r.status_code == 429: return True, "Sẵn sàng (đã chạm rate limit tạm thời)"
+            if r.status_code in (401, 403): return False, f"Key bị từ chối (HTTP {r.status_code})"
+            if r.status_code == 404:
+                info = self.fetch_models_and_limits()
+                if info.get("models") and info["models"][0] != model:
+                    self.model = info["models"][0]
                     return True, f"Đã tự động chuyển sang {self.model}"
                 return False, "Model không tồn tại."
-            return False, f"Lỗi HTTP {resp.status_code}"
-        except Exception as e: return False, str(e)
+            return False, f"Lỗi HTTP {r.status_code}"
+        except requests.exceptions.Timeout:
+            return False, "Timeout mạng (25s)"
+        except Exception as e:
+            return False, str(e)[:120]
 
     def _call_gemini(self, prompt: str, images_b64: List[str] = None) -> str:
         model = self.model or self._get_default_model()
@@ -99,110 +438,98 @@ class AISolver:
         if images_b64:
             for img in images_b64:
                 parts.append({"inlineData": {"mimeType": img.split(";")[0].replace("data:", ""), "data": img.split(",")[1]}})
-                
         payload = {"contents": [{"parts": parts}], "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2048, "responseMimeType": "application/json"}}
-        
-        max_retries = 5
-        for attempt in range(max_retries):
+        for attempt in range(5):
             try:
-                resp = self._session.post(url, json=payload, timeout=60)
-                if resp.status_code == 200: return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-                elif resp.status_code in (503, 429):
-                    time.sleep((attempt + 1) * 3)
-                    continue
-                elif resp.status_code == 404:
+                r = self._session.post(url, json=payload, timeout=60)
+                if r.status_code == 200: return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                if r.status_code in (503, 429): time.sleep((attempt + 1) * 3); continue
+                if r.status_code == 404:
                     info = self.fetch_models_and_limits()
                     if info.get("models") and info["models"][0] != model:
                         self.model = info["models"][0]
                         return self._call_gemini(prompt, images_b64)
-                    raise SolverError(f"Lỗi 404: Model {model} không khả dụng.")
-                else: raise SolverError(f"Gemini Error {resp.status_code}: {resp.text}")
+                    raise SolverError(f"Model {model} không khả dụng.")
+                raise SolverError(f"Gemini {r.status_code}: {r.text[:200]}")
             except requests.exceptions.RequestException as e:
-                if attempt == max_retries - 1: raise SolverError(f"Lỗi mạng: {str(e)}")
+                if attempt == 4: raise SolverError(f"Lỗi mạng: {e}")
                 time.sleep((attempt + 1) * 3)
-        raise SolverError("Server AI quá tải (503).")
+        raise SolverError("Gemini quá tải.")
+
+    def _call_openai_compatible(self, prompt: str) -> str:
+        url = self._OPENAI_COMPAT_URLS.get(self.provider)
+        if not url: raise SolverError(f"Provider {self.provider} chưa hỗ trợ.")
+        model = self.model or self._get_default_model()
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        for attempt in range(4):
+            try:
+                r = self._session.post(url, headers=headers, json={"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.1}, timeout=60)
+                if r.status_code == 200: return r.json()["choices"][0]["message"]["content"]
+                if r.status_code in (429, 503): time.sleep((attempt + 1) * 3); continue
+                if r.status_code == 404:
+                    info = self.fetch_models_and_limits()
+                    if info.get("models") and info["models"][0] != model:
+                        model = info["models"][0]; self.model = model; continue
+                    raise SolverError(f"Model {model} không khả dụng.")
+                raise SolverError(f"{self.provider} {r.status_code}: {r.text[:200]}")
+            except requests.exceptions.RequestException as e:
+                if attempt == 3: raise SolverError(f"Lỗi mạng: {e}")
+                time.sleep((attempt + 1) * 3)
+        raise SolverError(f"{self.provider} quá tải.")
 
     def _get_images(self, html_content: str) -> List[str]:
-        matches = re.findall(r'<img[^>]+src=["\'](data:image/[^;]+;base64,[^"\']+)["\']', html_content)
-        return [m for m in matches if len(m) < 4 * 1024 * 1024][:3]
+        m = re.findall(r'<img[^>]+src=["\'](data:image/[^;]+;base64,[^"\']+)["\']', html_content)
+        return [x for x in m if len(x) < 4 * 1024 * 1024][:3]
 
     def solve(self, question: Any) -> Dict[str, Any]:
         if self.used_today >= self.rpd_limit: raise SolverError("Đã hết hạn mức RPD.")
-        
         qtype, content = question.qtype, clean_display_text(question.content)
         images_b64 = self._get_images(question.content) if self.provider == "gemini" else []
-            
         role = "Bạn là một giáo viên giỏi giải bài tập chính xác tuyệt đối. Hãy phân tích cẩn thận."
-        
+
         if qtype == "choice":
             opts = "\n".join([f"{chr(65+i)}. {clean_display_text(o['text'])}" for i, o in enumerate(question.options)])
             prompt = f"{role}\nCâu hỏi: {content}\n\nCác lựa chọn:\n{opts}\n\nHãy giải thích ngắn gọn lý do, sau đó chỉ trả về JSON: {{\"answer\": \"<chữ_cái_đáp_án>\"}}"
-            
         elif qtype == "true_false":
             stmts = "\n".join([f"{i+1}. {clean_display_text(o['text'])}" for i, o in enumerate(question.options)])
             prompt = f"{role}\nĐề bài: {content}\nCác nhận định:\n{stmts}\n\nTrả về JSON: {{\"answers\": [\"true\", \"false\", ...]}}"
-            
         else:
-            # NÂNG CẤP SHORT ANSWER: Ép AI suy luận và đổi dấu chấm thành dấu phẩy
-            prompt = (
-                f"{role}\n"
-                f"Đề bài: {content}\n\n"
-                f"YÊU CẦU BẮT BUỘC:\n"
-                f"1. Hãy suy luận từng bước để tìm ra đáp số cuối cùng.\n"
-                f"2. Nếu đáp số là số thập phân, BẮT BUỘC sử dụng dấu phẩy (,) thay vì dấu chấm (.). Ví dụ: 3.14 phải viết là 3,14.\n"
-                f"3. Không bao gồm đơn vị đo lường (kg, m, cm...).\n"
-                f"4. Chỉ trả về JSON duy nhất: {{\"answer\": \"<đáp_số>\"}}"
-            )
+            prompt = (f"{role}\nĐề bài: {content}\n\nYÊU CẦU BẮT BUỘC:\n1. Suy luận từng bước.\n2. Nếu đáp số là số thập phân, BẮT BUỘC sử dụng dấu phẩy (,).\n3. Không bao gồm đơn vị.\n4. Chỉ trả về JSON: {{\"answer\": \"<đáp_số>\"}}")
 
         try:
             if self.provider == "gemini": raw = self._call_gemini(prompt, images_b64)
-            elif self.provider == "jev":
-                time.sleep(1.5)
-                return self._solve_jev(question)
-            else:
-                url = {"groq": "https://api.groq.com/openai/v1/chat/completions"}.get(self.provider)
-                if not url: raise SolverError("Provider chưa hỗ trợ.")
-                resp = self._session.post(url, headers={"Authorization": f"Bearer {self.api_key}"}, json={"model": self.model or self._get_default_model(), "messages": [{"role": "user", "content": prompt}], "temperature": 0.1}, timeout=45)
-                raw = resp.json()["choices"][0]["message"]["content"]
-
+            elif self.provider == "jev": time.sleep(1.5); return self._solve_jev(question)
+            else: raw = self._call_openai_compatible(prompt)
             json_ans = safe_parse_json(raw)
             self.used_today += 1
-            
         except Exception as e:
             raise SolverError(str(e))
 
-        # XỬ LÝ KẾT QUẢ TRẢ VỀ
         if qtype == "choice":
-            ans_letter = str(json_ans.get("answer", "A")).upper()
-            # Fallback nếu AI trả lời lan man
-            if len(ans_letter) > 1:
-                match = re.search(r'[A-D]', raw.upper())
-                ans_letter = match.group(0) if match else "A"
-                
-            idx = ord(ans_letter) - ord('A')
-            opt_id = question.options[idx]["id"] if idx < len(question.options) else question.options[0]["id"]
-            return {"stepId": question.id, "type": "choice", "optionId": opt_id}
-            
-        elif qtype == "true_false":
+            ans = str(json_ans.get("answer", "")).upper().strip()
+            if len(ans) != 1 or ans not in ("A", "B", "C", "D"):
+                m = re.search(r'\b([A-D])\b', raw.upper())
+                if not m: raise SolverError(f"AI không trả về đáp án: {raw[:80]}")
+                ans = m.group(1)
+            idx = ord(ans) - ord('A')
+            if idx >= len(question.options): raise SolverError("Đáp án vượt quá số lựa chọn")
+            return {"stepId": question.id, "type": "choice", "optionId": question.options[idx]["id"]}
+        if qtype == "true_false":
             arr = json_ans.get("answers", [])
-            if not isinstance(arr, list): arr = []
-            while len(arr) < len(question.options): arr.append("false")
+            if not isinstance(arr, list) or len(arr) < len(question.options): raise SolverError(f"AI thiếu đáp án Đ/S: {raw[:80]}")
             return {"stepId": question.id, "type": "true_false", "choices": [str(x).lower() for x in arr[:len(question.options)]]}
-            
-        else:
-            ans_text = str(json_ans.get("answer", "0")).strip()
-            # TỰ ĐỘNG ĐỔI DẤU CHẤM THÀNH DẤU PHẨY (Ví dụ: 3.14 -> 3,14)
-            ans_text = re.sub(r'(\d)\.(\d)', r'\1,\2', ans_text)
-            return {"stepId": question.id, "type": "text", "text": ans_text}
+        text = str(json_ans.get("answer", "")).strip()
+        if not text: raise SolverError(f"AI không trả về đáp số: {raw[:80]}")
+        text = re.sub(r'(\d)\.(\d)', r'\1,\2', text)
+        return {"stepId": question.id, "type": "text", "text": text}
 
     def _solve_jev(self, question: Any) -> Dict[str, Any]:
         def _q(labels, text):
             url = f"https://classifier.dev/{','.join(labels)}/{urllib.parse.quote(text[:800], safe='')}"
             try:
-                r = self._session.get(url, timeout=15)
+                r = self._session.get(url, timeout=20)
                 return r.text.strip() if r.status_code == 200 else labels[0]
-            except: return labels[0]
-
+            except Exception: return labels[0]
         if question.qtype == "choice":
             opts = "\n".join([f"{chr(65+i)}. {clean_display_text(o['text'])}" for i, o in enumerate(question.options)])
             pred = _q(["A", "B", "C", "D"][:len(question.options)], f"Câu hỏi: {question.content}\n{opts}")
@@ -211,757 +538,39 @@ class AISolver:
                     idx = ord(l) - ord('A')
                     if idx < len(question.options): return {"stepId": question.id, "type": "choice", "optionId": question.options[idx]["id"]}
             return {"stepId": question.id, "type": "choice", "optionId": question.options[0]["id"]}
-        elif question.qtype == "true_false":
+        if question.qtype == "true_false":
             res = [_q(["Dung", "Sai"], f"Đề: {question.content}\nNhận định: {s['text']}") for s in question.options]
             return {"stepId": question.id, "type": "true_false", "choices": ["true" if "dung" in r.lower() else "false" for r in res]}
         return {"stepId": question.id, "type": "text", "text": "1"}
 '''
 
 # ============================================================
-# 2. gui.py (Giữ nguyên phiên bản ổn định V3.1)
+# 3. gui.py — GIỮ NGUYÊN GIAO DIỆN GỐC
 # ============================================================
-FILES["gui.py"] = r'''import threading
-import customtkinter as ctk
-import tkinter as tk
-from tkinter import messagebox
-import time
-import json
-import os
-import base64
-from datetime import datetime
-from onluyen_api import OnluyenAPI, SessionExpiredError
-from solver import AISolver, clean_display_text
-
-try:
-    import customtkinter.windows.widgets.core_widget_classes.ctk_base_class as ctk_base
-    original_draw = ctk_base.CTkBaseClass._draw
-    def safe_draw(self, *args, **kwargs):
-        try: return original_draw(self, *args, **kwargs)
-        except tk.TclError: pass
-    ctk_base.CTkBaseClass._draw = safe_draw
-except Exception: pass
-
-ctk.set_appearance_mode("Dark")
-ctk.set_default_color_theme("blue")
-
-BG = "#0F172A"; SIDEBAR = "#1E293B"; CARD = "#1E293B"; HOVER = "#334155"; BORDER = "#334155"
-ACCENT = "#3B82F6"; ACCENT_HOVER = "#2563EB"; TEXT_P = "#F8FAFC"; TEXT_S = "#94A3B8"
-DANGER = "#EF4444"; SUCCESS = "#10B981"; WARNING = "#F59E0B"
-
-CONFIG_FILE = ".ai_config.json"
-
-class App(ctk.CTk):
-    def __init__(self):
-        super().__init__()
-        self.title("Onluyen Solver - Pro Dashboard")
-        self.geometry("1280x800")
-        self.configure(fg_color=BG)
-        
-        self.api = OnluyenAPI()
-        self.running = False
-        self.ai_config = self._load_config()
-        
-        self.start_time = 0
-        self.timer_running = False
-        
-        self.pacing_mode = ctk.StringVar(value="1")
-        self.total_time_minutes = ctk.DoubleVar(value=10.0)
-        self.delay_per_question = ctk.DoubleVar(value=5.0)
-        self.submit_mode = ctk.StringVar(value="1")
-        self.submit_wait_minutes = ctk.DoubleVar(value=3.0)
-
-        self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(0, weight=1)
-        self._build_sidebar()
-        
-        self.content = ctk.CTkFrame(self, fg_color="transparent")
-        self.content.grid(row=0, column=1, sticky="nsew")
-        self.content.grid_rowconfigure(0, weight=1)
-        self.content.grid_columnconfigure(0, weight=1)
-
-        self.pages = {}
-        self._build_pages()
-        self.show_page("login")
-        self.after(100, self._auto_login)
-
-    def _load_config(self):
-        if os.path.exists(CONFIG_FILE):
-            try:
-                with open(CONFIG_FILE, "r") as f: 
-                    data = json.load(f)
-                    if isinstance(data, dict): return []
-                    return data
-            except: pass
-        return []
-
-    def _save_config(self):
-        today = datetime.now().strftime("%Y-%m-%d")
-        for cfg in self.ai_config:
-            if cfg.get("last_date") != today:
-                cfg["used_today"] = 0
-                cfg["last_date"] = today
-        with open(CONFIG_FILE, "w") as f: json.dump(self.ai_config, f, indent=4)
-
-    def _clear_frame(self, frame):
-        for widget in frame.winfo_children():
-            try: widget.destroy()
-            except Exception: pass
-
-    def _build_sidebar(self):
-        self.sidebar = ctk.CTkFrame(self, width=250, corner_radius=0, fg_color=SIDEBAR)
-        self.sidebar.grid(row=0, column=0, sticky="nsew")
-        self.sidebar.grid_rowconfigure(6, weight=1)
-
-        logo = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        logo.grid(row=0, column=0, padx=25, pady=(40, 40), sticky="w")
-        ctk.CTkLabel(logo, text="ONLUYEN", font=("Segoe UI", 24, "bold"), text_color=ACCENT).pack(side="left")
-        ctk.CTkLabel(logo, text="PRO", font=("Segoe UI", 24), text_color=TEXT_P).pack(side="left", padx=(5,0))
-
-        self.nav_btns = {}
-        menus = [("assign", "📚  Bài tập"), ("history", "📊  Bài đã nộp"), ("ai", "🤖  Cấu hình AI"), ("solve", "🚀  Tiến trình"), ("settings", "⚙️  Cài đặt")]
-        
-        for i, (key, text) in enumerate(menus, start=1):
-            btn = ctk.CTkButton(self.sidebar, text=text, font=("Segoe UI", 15), anchor="w", fg_color="transparent", hover_color=HOVER, corner_radius=8, height=45)
-            btn.configure(command=lambda k=key: self.show_page(k))
-            btn.grid(row=i, column=0, padx=15, pady=5, sticky="ew")
-            self.nav_btns[key] = btn
-
-        bottom = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        bottom.grid(row=7, column=0, padx=15, pady=20, sticky="ew")
-        
-        self.user_frame = ctk.CTkFrame(bottom, fg_color=CARD, corner_radius=8, border_width=1, border_color=BORDER)
-        self.user_frame.pack(fill="x")
-        
-        self.user_btn = ctk.CTkButton(self.user_frame, text="👤 Tài khoản ▾", font=("Segoe UI", 13, "bold"), fg_color="transparent", hover_color=HOVER, height=40, anchor="w")
-        self.user_btn.pack(fill="x", padx=2, pady=2)
-        self.user_btn.bind("<Button-1>", self._show_user_menu)
-
-        self.user_menu = tk.Menu(self, tearoff=0, bg=CARD, fg=TEXT_P, font=("Segoe UI", 12), activebackground=ACCENT, activeforeground=TEXT_P)
-        self.user_menu.add_command(label="Đổi tài khoản", command=self._show_account_manager)
-        self.user_menu.add_separator()
-        self.user_menu.add_command(label="Đăng xuất", command=self._logout)
-
-        ctk.CTkLabel(bottom, text="v4.0.0 - Stable", font=("Segoe UI", 10), text_color=TEXT_S).pack(pady=(10, 0))
-
-    def _show_user_menu(self, event):
-        x = self.user_btn.winfo_rootx()
-        y = self.user_btn.winfo_rooty() - 80
-        self.user_menu.post(x, y)
-
-    def _build_pages(self):
-        # --- LOGIN ---
-        self.pages["login"] = ctk.CTkFrame(self.content, fg_color=BG, corner_radius=0)
-        left = ctk.CTkFrame(self.pages["login"], fg_color=SIDEBAR, corner_radius=0)
-        left.place(relx=0, rely=0, relwidth=0.5, relheight=1)
-        ctk.CTkLabel(left, text="Chào mừng đến với\nOnluyen AI Pro", font=("Segoe UI", 38, "bold"), text_color=TEXT_P, justify="left").place(relx=0.5, rely=0.4, anchor="center")
-        ctk.CTkLabel(left, text="Tự động hóa - Chính xác - Nhanh chóng", font=("Segoe UI", 16), text_color=TEXT_S).place(relx=0.5, rely=0.5, anchor="center")
-        
-        right = ctk.CTkFrame(self.pages["login"], fg_color="transparent")
-        right.place(relx=0.5, rely=0, relwidth=0.5, relheight=1)
-        self.login_form = ctk.CTkFrame(right, fg_color="transparent")
-        self.login_form.place(relx=0.5, rely=0.5, anchor="center")
-        
-        ctk.CTkLabel(self.login_form, text="Đăng nhập", font=("Segoe UI", 28, "bold"), text_color=TEXT_P).pack(anchor="w", pady=(0, 20))
-        self.entry_user = ctk.CTkEntry(self.login_form, width=350, height=50, placeholder_text="Email / SĐT", font=("Segoe UI", 14), corner_radius=8, fg_color=BG, border_color=BORDER)
-        self.entry_user.pack(pady=10)
-        self.entry_pass = ctk.CTkEntry(self.login_form, width=350, height=50, show="*", placeholder_text="Mật khẩu", font=("Segoe UI", 14), corner_radius=8, fg_color=BG, border_color=BORDER)
-        self.entry_pass.pack(pady=10)
-        
-        self.btn_login = ctk.CTkButton(self.login_form, text="Đăng nhập ngay", font=("Segoe UI", 15, "bold"), height=50, corner_radius=8, fg_color=ACCENT, hover_color=ACCENT_HOVER, command=self._do_login)
-        self.btn_login.pack(fill="x", pady=20)
-        self.lbl_login = ctk.CTkLabel(self.login_form, text="", font=("Segoe UI", 13))
-        self.lbl_login.pack()
-        
-        self.btn_back_login = ctk.CTkButton(self.login_form, text="Quay lại", font=("Segoe UI", 13), fg_color="transparent", hover_color=HOVER, text_color=TEXT_S, command=self._cancel_add_account)
-
-        # --- ASSIGN ---
-        self.pages["assign"] = ctk.CTkFrame(self.content, fg_color=BG, corner_radius=0)
-        h_assign = ctk.CTkFrame(self.pages["assign"], fg_color="transparent")
-        h_assign.pack(fill="x", padx=40, pady=(40, 20))
-        ctk.CTkLabel(h_assign, text="Danh sách bài tập", font=("Segoe UI", 26, "bold"), text_color=TEXT_P).pack(side="left")
-        ctk.CTkButton(h_assign, text="🔄 Làm mới", width=110, height=38, fg_color=CARD, hover_color=HOVER, text_color=TEXT_P, corner_radius=8, command=self._load_assignments).pack(side="right")
-        self.assign_scroll = ctk.CTkScrollableFrame(self.pages["assign"], fg_color="transparent")
-        self.assign_scroll.pack(fill="both", expand=True, padx=40, pady=(0, 30))
-
-        # --- HISTORY ---
-        self.pages["history"] = ctk.CTkFrame(self.content, fg_color=BG, corner_radius=0)
-        h_history = ctk.CTkFrame(self.pages["history"], fg_color="transparent")
-        h_history.pack(fill="x", padx=40, pady=(40, 20))
-        ctk.CTkLabel(h_history, text="Bài tập đã nộp", font=("Segoe UI", 26, "bold"), text_color=TEXT_P).pack(side="left")
-        ctk.CTkButton(h_history, text="🔄 Làm mới", width=110, height=38, fg_color=CARD, hover_color=HOVER, text_color=TEXT_P, corner_radius=8, command=self._load_history).pack(side="right")
-        self.history_scroll = ctk.CTkScrollableFrame(self.pages["history"], fg_color="transparent")
-        self.history_scroll.pack(fill="both", expand=True, padx=40, pady=(0, 30))
-
-        # --- AI SETTINGS ---
-        self.pages["ai"] = ctk.CTkFrame(self.content, fg_color=BG, corner_radius=0)
-        ctk.CTkLabel(self.pages["ai"], text="Cấu hình AI Provider", font=("Segoe UI", 26, "bold"), text_color=TEXT_P).pack(anchor="w", padx=40, pady=(40, 20))
-        
-        add_frame = ctk.CTkFrame(self.pages["ai"], fg_color=CARD, corner_radius=12, border_width=1, border_color=BORDER)
-        add_frame.pack(fill="x", padx=40, pady=(0, 10))
-        
-        inner = ctk.CTkFrame(add_frame, fg_color="transparent")
-        inner.pack(pady=20, padx=20, fill="x")
-        
-        row1 = ctk.CTkFrame(inner, fg_color="transparent")
-        row1.pack(fill="x", pady=5)
-        
-        ctk.CTkLabel(row1, text="Provider:", font=("Segoe UI", 14), text_color=TEXT_P).pack(side="left")
-        self.provider_var = ctk.StringVar(value="gemini")
-        self.opt_provider = ctk.CTkOptionMenu(row1, values=["gemini", "jev", "groq", "openrouter", "mistral"], variable=self.provider_var, fg_color=BG, button_color=HOVER, width=120, command=self._on_provider_change)
-        self.opt_provider.pack(side="left", padx=10)
-        
-        self.lbl_api = ctk.CTkLabel(row1, text="API Key:", font=("Segoe UI", 14), text_color=TEXT_P)
-        self.lbl_api.pack(side="left", padx=(10,0))
-        
-        self.entry_api = ctk.CTkEntry(row1, width=250, height=35, placeholder_text="Nhập API Key...", fg_color=BG, border_color=BORDER)
-        self.entry_api.pack(side="left", padx=10)
-        
-        ctk.CTkLabel(row1, text="Model:", font=("Segoe UI", 14), text_color=TEXT_P).pack(side="left", padx=(10,0))
-        self.entry_model = ctk.CTkEntry(row1, width=180, height=35, placeholder_text="Tự động", fg_color=BG, border_color=BORDER)
-        self.entry_model.pack(side="left", padx=10)
-        
-        ctk.CTkButton(row1, text="➕ Thêm Key", width=100, height=35, fg_color=ACCENT, hover_color=ACCENT_HOVER, command=self._add_key).pack(side="left", padx=5)
-        ctk.CTkButton(row1, text="🔍 Test Key", width=100, height=35, fg_color=HOVER, border_width=1, border_color=BORDER, command=self._test_api_key).pack(side="left", padx=5)
-        
-        self.lbl_provider_note = ctk.CTkLabel(inner, text="", font=("Segoe UI", 12, "italic"), text_color=WARNING, justify="left")
-        self.lbl_provider_note.pack(fill="x", pady=(5, 0))
-        
-        self._on_provider_change("gemini")
-        
-        self.lbl_ai_status = ctk.CTkLabel(self.pages["ai"], text="", font=("Segoe UI", 13), text_color=TEXT_S)
-        self.lbl_ai_status.pack(anchor="w", padx=40, pady=(0, 10))
-
-        list_frame = ctk.CTkFrame(self.pages["ai"], fg_color="transparent")
-        list_frame.pack(fill="both", expand=True, padx=40)
-        ctk.CTkLabel(list_frame, text="Danh sách Key đang hoạt động", font=("Segoe UI", 16, "bold"), text_color=TEXT_P).pack(anchor="w", pady=(10, 10))
-        
-        self.key_list_frame = ctk.CTkScrollableFrame(list_frame, fg_color="transparent")
-        self.key_list_frame.pack(fill="both", expand=True)
-        self._refresh_key_list()
-
-        # --- SOLVE ---
-        self.pages["solve"] = ctk.CTkFrame(self.content, fg_color=BG, corner_radius=0)
-        self.info_card = ctk.CTkFrame(self.pages["solve"], fg_color=CARD, corner_radius=12, border_width=1, border_color=BORDER)
-        self.info_card.pack(fill="x", padx=40, pady=(30, 20))
-        info_inner = ctk.CTkFrame(self.info_card, fg_color="transparent")
-        info_inner.pack(fill="x", padx=20, pady=15)
-        self.lbl_bai_hoc = ctk.CTkLabel(info_inner, text="Chưa chọn bài tập", font=("Segoe UI", 20, "bold"), text_color=TEXT_P, anchor="w")
-        self.lbl_bai_hoc.pack(side="left")
-        self.lbl_timer = ctk.CTkLabel(info_inner, text="⏱️ 00:00", font=("Consolas", 22, "bold"), text_color=ACCENT)
-        self.lbl_timer.pack(side="right")
-
-        progress_frame = ctk.CTkFrame(self.pages["solve"], fg_color="transparent")
-        progress_frame.pack(fill="x", padx=40, pady=(0, 10))
-        self.lbl_progress = ctk.CTkLabel(progress_frame, text="Đang chờ lệnh...", font=("Segoe UI", 13), text_color=TEXT_S)
-        self.lbl_progress.pack(anchor="w")
-        self.progress = ctk.CTkProgressBar(progress_frame, height=10, corner_radius=5, progress_color=ACCENT, fg_color=BORDER)
-        self.progress.pack(fill="x", pady=5)
-        self.progress.set(0)
-        
-        split_frame = ctk.CTkFrame(self.pages["solve"], fg_color="transparent")
-        split_frame.pack(fill="both", expand=True, padx=40, pady=10)
-        split_frame.grid_columnconfigure(0, weight=4)
-        split_frame.grid_columnconfigure(1, weight=6)
-        split_frame.grid_rowconfigure(0, weight=1)
-        
-        left_log_frame = ctk.CTkFrame(split_frame, fg_color="transparent")
-        left_log_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
-        ctk.CTkLabel(left_log_frame, text="⚡ Tiến trình xử lý", font=("Segoe UI", 14, "bold"), text_color=TEXT_S).pack(anchor="w", pady=(0, 5))
-        self.log_box = ctk.CTkTextbox(left_log_frame, font=("Consolas", 13), fg_color="#0B1120", text_color="#A3E635", corner_radius=10, border_width=1, border_color=BORDER)
-        self.log_box.pack(fill="both", expand=True)
-        
-        right_log_frame = ctk.CTkFrame(split_frame, fg_color="transparent")
-        right_log_frame.grid(row=0, column=1, sticky="nsew")
-        ctk.CTkLabel(right_log_frame, text="🔍 Chi tiết câu hỏi & Đáp án AI", font=("Segoe UI", 14, "bold"), text_color=TEXT_S).pack(anchor="w", pady=(0, 5))
-        self.log_detail_box = ctk.CTkTextbox(right_log_frame, font=("Consolas", 13), fg_color="#0B1120", text_color="#60A5FA", corner_radius=10, border_width=1, border_color=BORDER)
-        self.log_detail_box.pack(fill="both", expand=True)
-        
-        self.btn_stop = ctk.CTkButton(self.pages["solve"], text="Dừng tiến trình", fg_color=DANGER, font=("Segoe UI", 14, "bold"), height=45, width=200, corner_radius=8, command=self._stop_solving, state="disabled")
-        self.btn_stop.pack(pady=(0, 20))
-
-        # --- SETTINGS ---
-        self.pages["settings"] = ctk.CTkFrame(self.content, fg_color=BG, corner_radius=0)
-        ctk.CTkLabel(self.pages["settings"], text="Cài đặt thời gian", font=("Segoe UI", 26, "bold"), text_color=TEXT_P).pack(anchor="w", padx=40, pady=(40, 20))
-        
-        set_card = ctk.CTkFrame(self.pages["settings"], fg_color=CARD, corner_radius=12, border_width=1, border_color=BORDER)
-        set_card.pack(fill="x", padx=40, pady=10)
-        s_inner = ctk.CTkFrame(set_card, fg_color="transparent")
-        s_inner.pack(pady=20, padx=20, fill="x")
-        
-        ctk.CTkLabel(s_inner, text="1. Phân bổ thời gian", font=("Segoe UI", 16, "bold"), text_color=TEXT_P).pack(anchor="w", pady=(0, 10))
-        ctk.CTkRadioButton(s_inner, text="Giải tốc độ tối đa (làm ngay không chờ)", variable=self.pacing_mode, value="1", font=("Segoe UI", 14)).pack(anchor="w", pady=5)
-        f_div = ctk.CTkFrame(s_inner, fg_color="transparent")
-        f_div.pack(anchor="w", pady=5)
-        ctk.CTkRadioButton(f_div, text="Chia đều tổng thời gian làm bài (phút):", variable=self.pacing_mode, value="2", font=("Segoe UI", 14)).pack(side="left")
-        ctk.CTkEntry(f_div, textvariable=self.total_time_minutes, width=60).pack(side="left", padx=10)
-        f_fix = ctk.CTkFrame(s_inner, fg_color="transparent")
-        f_fix.pack(anchor="w", pady=5)
-        ctk.CTkRadioButton(f_fix, text="Cố định thời gian mỗi câu (giây):", variable=self.pacing_mode, value="3", font=("Segoe UI", 14)).pack(side="left")
-        ctk.CTkEntry(f_fix, textvariable=self.delay_per_question, width=60).pack(side="left", padx=10)
-
-        ctk.CTkLabel(s_inner, text="2. Chế độ nộp bài", font=("Segoe UI", 16, "bold"), text_color=TEXT_P).pack(anchor="w", pady=(20, 10))
-        f_auto = ctk.CTkFrame(s_inner, fg_color="transparent")
-        f_auto.pack(anchor="w", pady=5)
-        ctk.CTkRadioButton(f_auto, text="Tự động nộp bài sau khi làm xong (đảm bảo đủ 3 phút):", variable=self.submit_mode, value="1", font=("Segoe UI", 14)).pack(side="left")
-        f_timed = ctk.CTkFrame(s_inner, fg_color="transparent")
-        f_timed.pack(anchor="w", pady=5)
-        ctk.CTkRadioButton(f_timed, text="Hẹn giờ nộp bài (đợi đủ số phút):", variable=self.submit_mode, value="2", font=("Segoe UI", 14)).pack(side="left")
-        ctk.CTkEntry(f_timed, textvariable=self.submit_wait_minutes, width=60).pack(side="left", padx=10)
-        ctk.CTkRadioButton(s_inner, text="KHÔNG nộp bài (Chỉ lưu đáp án lên server)", variable=self.submit_mode, value="3", font=("Segoe UI", 14)).pack(anchor="w", pady=5)
-
-    # --- LOGIC ĐIỀU HƯỚNG ---
-    def show_page(self, name):
-        for p in self.pages.values(): p.pack_forget()
-        self.pages[name].pack(fill="both", expand=True)
-        for k, btn in self.nav_btns.items():
-            btn.configure(fg_color=HOVER if k == name else "transparent")
-
-    def _auto_login(self):
-        if self.api.auto_login():
-            self._login_success()
-
-    def _do_login(self):
-        u, p = self.entry_user.get().strip(), self.entry_pass.get().strip()
-        if not u or not p:
-            self.lbl_login.configure(text="Vui lòng nhập đủ Email/SĐT và Mật khẩu", text_color=DANGER)
-            return
-        self.btn_login.configure(state="disabled", text="Đang xử lý...")
-        def task():
-            try:
-                self.api.login(u, p)
-                self.after(0, self._login_success)
-            except Exception as e:
-                err_msg = str(e)
-                self.after(0, lambda: self.lbl_login.configure(text=err_msg, text_color=DANGER))
-                self.after(0, lambda: self.btn_login.configure(state="normal", text="Đăng nhập ngay"))
-        threading.Thread(target=task, daemon=True).start()
-
-    def _login_success(self):
-        self.btn_login.configure(state="normal", text="Đăng nhập ngay")
-        name = self.api.display_name or self.api.email
-        self.user_btn.configure(text=f"👤 {name} ▾")
-        if hasattr(self, 'account_dialog') and self.account_dialog.winfo_exists():
-            self.account_dialog.destroy()
-        self.show_page("assign")
-        self._load_assignments()
-
-    def _logout(self):
-        self.api.logout()
-        self.user_btn.configure(text="👤 Tài khoản ▾")
-        self.show_page("login")
-
-    def _load_assignments(self):
-        self._clear_frame(self.assign_scroll)
-        ctk.CTkLabel(self.assign_scroll, text="Đang tải...", text_color=TEXT_S).pack(pady=30)
-        def task():
-            try:
-                try: assigns = self.api.get_assignments(filter_status="todo")
-                except TypeError:
-                    assigns = self.api.get_assignments()
-                    assigns = [a for a in assigns if getattr(a, 'status', 0) not in (2, 3) and not getattr(a, 'completed', False)]
-                if self.pages["assign"].winfo_exists(): self.after(0, lambda: self._render_assignments(assigns))
-            except SessionExpiredError:
-                self.after(0, lambda: messagebox.showerror("Hết phiên", "Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại."))
-                self.after(0, self._logout)
-            except Exception as e:
-                err_msg = str(e)
-                if self.pages["assign"].winfo_exists():
-                    self.after(0, lambda: ctk.CTkLabel(self.assign_scroll, text=f"Lỗi: {err_msg}", text_color=DANGER).pack())
-        threading.Thread(target=task, daemon=True).start()
-
-    def _render_assignments(self, assigns):
-        self._clear_frame(self.assign_scroll)
-        if not assigns:
-            ctk.CTkLabel(self.assign_scroll, text="Không có bài tập nào chưa làm.", text_color=TEXT_S).pack(pady=30)
-            return
-        for a in assigns:
-            card = ctk.CTkFrame(self.assign_scroll, fg_color=CARD, corner_radius=12, border_width=1, border_color=BORDER)
-            card.pack(fill="x", pady=8, padx=10)
-            info = ctk.CTkFrame(card, fg_color="transparent")
-            info.pack(side="left", padx=20, pady=15, fill="x", expand=True)
-            ctk.CTkLabel(info, text=a.title, font=("Segoe UI", 16, "bold"), text_color=TEXT_P, anchor="w").pack(fill="x")
-            ctk.CTkLabel(info, text=f"Môn: {a.subject}", font=("Segoe UI", 13), text_color=TEXT_S, anchor="w").pack(fill="x")
-            ctk.CTkButton(card, text="Làm bài", width=100, height=38, fg_color=ACCENT, hover_color=ACCENT_HOVER, corner_radius=8, command=lambda title=a.title, id=a.assign_id: self._show_mode_dialog(title, id)).pack(side="right", padx=20)
-
-    def _load_history(self):
-        self._clear_frame(self.history_scroll)
-        ctk.CTkLabel(self.history_scroll, text="Đang tải...", text_color=TEXT_S).pack(pady=30)
-        def task():
-            try:
-                try: assigns = self.api.get_assignments(filter_status="done")
-                except TypeError:
-                    assigns = self.api.get_assignments()
-                    assigns = [a for a in assigns if getattr(a, 'status', 0) in (2, 3) or getattr(a, 'completed', False)]
-                if self.pages["history"].winfo_exists(): self.after(0, lambda: self._render_history(assigns))
-            except SessionExpiredError:
-                self.after(0, lambda: messagebox.showerror("Hết phiên", "Phiên đăng nhập đã hết hạn."))
-                self.after(0, self._logout)
-            except Exception as e:
-                err_msg = str(e)
-                if self.pages["history"].winfo_exists():
-                    self.after(0, lambda: ctk.CTkLabel(self.history_scroll, text=f"Lỗi: {err_msg}", text_color=DANGER).pack())
-        threading.Thread(target=task, daemon=True).start()
-
-    def _render_history(self, assigns):
-        self._clear_frame(self.history_scroll)
-        if not assigns:
-            ctk.CTkLabel(self.history_scroll, text="Chưa có bài tập nào đã nộp.", text_color=TEXT_S).pack(pady=30)
-            return
-        for a in assigns:
-            card = ctk.CTkFrame(self.history_scroll, fg_color=CARD, corner_radius=12, border_width=1, border_color=BORDER)
-            card.pack(fill="x", pady=8, padx=10)
-            info = ctk.CTkFrame(card, fg_color="transparent")
-            info.pack(side="left", padx=20, pady=15, fill="x", expand=True)
-            ctk.CTkLabel(info, text=a.title, font=("Segoe UI", 16, "bold"), text_color=TEXT_P, anchor="w").pack(fill="x")
-            ctk.CTkLabel(info, text=f"Môn: {a.subject}", font=("Segoe UI", 13), text_color=TEXT_S, anchor="w").pack(fill="x")
-            score = getattr(a, 'score', None) or getattr(a, 'totalScore', None)
-            score_str = f"{score}/10" if score is not None else "Đã nộp"
-            ctk.CTkLabel(card, text=score_str, font=("Segoe UI", 18, "bold"), text_color=SUCCESS).pack(side="right", padx=20)
-
-    def _on_provider_change(self, choice):
-        if choice == "jev":
-            self.entry_api.configure(state="disabled", placeholder_text="Không cần API Key")
-            self.lbl_api.configure(text="API Key (Miễn phí):")
-        else:
-            self.entry_api.configure(state="normal", placeholder_text="Nhập API Key...")
-            self.lbl_api.configure(text="API Key:")
-        notes = {
-            "gemini": "🔗 generativelanguage.googleapis.com | Khuyên dùng model: gemini-1.5-flash",
-            "groq": "🔗 api.groq.com | Lấy key tại console.groq.com",
-            "openrouter": "🔗 openrouter.ai | Key bắt đầu bằng 'sk-or-...'",
-            "mistral": "🔗 api.mistral.ai | Key lấy từ console.mistral.ai",
-            "jev": "🔗 classifier.dev | Miễn phí, độ chính xác thấp, không cần API Key"
-        }
-        if hasattr(self, 'lbl_provider_note'): self.lbl_provider_note.configure(text=notes.get(choice, ""))
-
-    def _log_ui(self, msg, color=TEXT_S):
-        if hasattr(self, 'lbl_ai_status') and self.lbl_ai_status.winfo_exists():
-            self.after(0, lambda: self.lbl_ai_status.configure(text=msg, text_color=color))
-
-    def _test_api_key(self):
-        p, k = self.provider_var.get(), self.entry_api.get().strip()
-        if p != "jev" and not k: return messagebox.showwarning("Thiếu Key", "Vui lòng nhập API Key để test.")
-        self._log_ui("Đang kiểm tra Key...", ACCENT)
-        def task():
-            solver = AISolver(p, k)
-            info = solver.fetch_models_and_limits()
-            if "error" in info: return self.after(0, lambda: self._log_ui(f"Lỗi: {info['error']}", DANGER))
-            models = info.get("models", [])
-            if not models and p != "jev": return self.after(0, lambda: self._log_ui("Key hợp lệ nhưng không lấy được model.", DANGER))
-            best_model = models[0] if models else ""
-            self.after(0, lambda: self.entry_model.delete(0, "end") or self.entry_model.insert(0, best_model))
-            self.after(0, lambda: self._log_ui(f"✅ Key OK! Model khuyên dùng: {best_model}", SUCCESS))
-        threading.Thread(target=task, daemon=True).start()
-
-    def _add_key(self):
-        p, k, m = self.provider_var.get(), self.entry_api.get().strip(), self.entry_model.get().strip()
-        if p != "jev" and not k: return messagebox.showerror("Lỗi", "Vui lòng nhập API Key.")
-        self._log_ui("Đang xác thực và thêm Key...", ACCENT)
-        def task():
-            solver = AISolver(p, k, m)
-            info = solver.fetch_models_and_limits()
-            if "error" in info: return self.after(0, lambda: self._log_ui(f"Lỗi: {info['error']}", DANGER))
-            final_model = m if m else (info["models"][0] if info["models"] else solver._get_default_model())
-            solver.model = final_model
-            is_ready, quota_msg = solver.check_quota()
-            def update_ui():
-                today = datetime.now().strftime("%Y-%m-%d")
-                self.ai_config.append({"provider": p, "api_key": k, "model": final_model, "valid": is_ready, "status_msg": quota_msg, "limits": info["limits"], "used_today": 0, "last_date": today})
-                self._save_config()
-                self._refresh_key_list()
-                self.entry_api.delete(0, "end")
-                self.entry_model.delete(0, "end")
-                self._log_ui(f"Thêm thành công! Trạng thái: {quota_msg}", SUCCESS if is_ready else WARNING)
-            self.after(0, update_ui)
-        threading.Thread(target=task, daemon=True).start()
-
-    def _refresh_key_list(self):
-        self._clear_frame(self.key_list_frame)
-        if not self.ai_config:
-            ctk.CTkLabel(self.key_list_frame, text="Chưa có API Key nào. Hãy thêm ở trên.", text_color=TEXT_S).pack(pady=20)
-            return
-        for i, cfg in enumerate(self.ai_config):
-            card = ctk.CTkFrame(self.key_list_frame, fg_color=CARD, corner_radius=8, border_width=1, border_color=BORDER)
-            card.pack(fill="x", pady=5, padx=5)
-            status_msg = cfg.get("status_msg", "Chưa kiểm tra")
-            is_valid = cfg.get("valid", False)
-            color = SUCCESS if is_valid else WARNING
-            if "Lỗi" in status_msg or "Hết" in status_msg: color = DANGER
-            model_str = cfg.get('model') or "Mặc định"
-            limits = cfg.get("limits", {})
-            used = cfg.get("used_today", 0)
-            limit_str = f"({limits.get('rpm', '?')} RPM / {limits.get('rpd', '?')} RPD) - Đã dùng: {used}" if limits else ""
-            info = f"[{cfg['provider'].upper()}] {model_str} {limit_str}"
-            ctk.CTkLabel(card, text=info, font=("Segoe UI", 14, "bold"), text_color=TEXT_P).pack(side="left", padx=15, pady=10)
-            ctk.CTkLabel(card, text=status_msg, font=("Segoe UI", 12, "bold"), text_color=color).pack(side="left", padx=10)
-            ctk.CTkButton(card, text="Xóa", width=50, height=30, fg_color="transparent", border_width=1, border_color=DANGER, text_color=DANGER, hover_color="#450a0a", command=lambda idx=i: self._remove_key(idx)).pack(side="right", padx=5)
-            ctk.CTkButton(card, text="Check", width=60, height=30, fg_color="transparent", border_width=1, border_color=ACCENT, text_color=ACCENT, hover_color="#1e3a8a", command=lambda idx=i: self._check_key_quota(idx)).pack(side="right", padx=5)
-
-    def _check_key_quota(self, idx):
-        if idx >= len(self.ai_config): return
-        cfg = self.ai_config[idx]
-        self._log_ui(f"Đang kiểm tra lại {cfg['provider'].upper()}...", ACCENT)
-        def task():
-            solver = AISolver(cfg["provider"], cfg["api_key"], cfg["model"], rpd_limit=cfg["limits"].get("rpd", 1500))
-            solver.used_today = cfg.get("used_today", 0)
-            is_ready, quota_msg = solver.check_quota()
-            def update_ui():
-                if idx < len(self.ai_config):
-                    self.ai_config[idx]["valid"] = is_ready
-                    self.ai_config[idx]["status_msg"] = quota_msg
-                    self.ai_config[idx]["model"] = solver.model
-                    self._save_config()
-                    self._refresh_key_list()
-                    self._log_ui(f"Cập nhật: {quota_msg}", SUCCESS if is_ready else DANGER)
-            self.after(0, update_ui)
-        threading.Thread(target=task, daemon=True).start()
-
-    def _remove_key(self, idx):
-        if idx < len(self.ai_config):
-            self.ai_config.pop(idx)
-            self._save_config()
-            self._refresh_key_list()
-
-    def _show_mode_dialog(self, title, assign_id):
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Chọn chế độ giải")
-        dialog.geometry("450x320")
-        dialog.configure(fg_color=BG)
-        dialog.attributes("-topmost", True)
-        dialog.grab_set()
-        dialog.update_idletasks()
-        x = self.winfo_x() + (self.winfo_width() - dialog.winfo_width()) // 2
-        y = self.winfo_y() + (self.winfo_height() - dialog.winfo_height()) // 2
-        dialog.geometry(f"+{x}+{y}")
-        ctk.CTkLabel(dialog, text="CHỌN CHẾ ĐỘ GIẢI BÀI", font=("Segoe UI", 18, "bold"), text_color=TEXT_P).pack(pady=(20, 5))
-        ctk.CTkLabel(dialog, text=title, font=("Segoe UI", 13), text_color=ACCENT).pack(pady=(0, 15))
-        has_api_key = any(k.get("valid") for k in self.ai_config if k.get("provider") != "jev")
-        btn1 = ctk.CTkButton(dialog, text="1. Sử dụng API Key (AI Mạnh)\nĐộ chính xác cao, có phân tích từng bước", font=("Segoe UI", 14), height=60, fg_color=ACCENT, hover_color=ACCENT_HOVER, command=lambda: self._start_solving(title, assign_id, True, dialog))
-        btn1.pack(fill="x", padx=30, pady=8)
-        if not has_api_key: btn1.configure(state="disabled", text="1. Sử dụng API Key (Chưa cài đặt)\nHãy vào Cấu hình AI để thêm Key")
-        btn2 = ctk.CTkButton(dialog, text="2. Không dùng API Key (Miễn phí)\nDùng Jev Classifier, chính xác thấp hơn", font=("Segoe UI", 14), height=60, fg_color="#4B5563", hover_color="#374151", command=lambda: self._start_solving(title, assign_id, False, dialog))
-        btn2.pack(fill="x", padx=30, pady=8)
-        ctk.CTkButton(dialog, text="Hủy", font=("Segoe UI", 13), fg_color="transparent", hover_color=HOVER, text_color=TEXT_S, command=dialog.destroy).pack(pady=(10, 15))
-
-    def _start_solving(self, title, assign_id, use_api: bool, dialog):
-        dialog.destroy()
-        if use_api:
-            valid_keys = [k for k in self.ai_config if k.get("valid") and k.get("provider") != "jev"]
-            if not valid_keys: return messagebox.showerror("Lỗi", "Không có API Key hợp lệ nào.")
-            chosen_config = valid_keys[0]
-        else:
-            chosen_config = {"provider": "jev", "api_key": "", "model": "jev-classifier", "used_today": 0}
-        self.show_page("solve")
-        self._run_solver(title, assign_id, chosen_config)
-
-    def _run_solver(self, title, assign_id, config):
-        self.running = True
-        self.btn_stop.configure(state="normal")
-        self.log_box.delete("1.0", "end")
-        self.log_detail_box.delete("1.0", "end")
-        self.progress.set(0)
-        self.lbl_bai_hoc.configure(text=f"{title}\nID: {assign_id}")
-        self.lbl_progress.configure(text="Đang khởi tạo...")
-        self.start_time = time.time()
-        self.timer_running = True
-        self._update_timer()
-        
-        pacing = self.pacing_mode.get()
-        sub_mode = self.submit_mode.get()
-        try: total_mins = float(self.total_time_minutes.get())
-        except: total_mins = 10.0
-        try: delay_sec = float(self.delay_per_question.get())
-        except: delay_sec = 5.0
-        try: wait_mins = float(self.submit_wait_minutes.get())
-        except: wait_mins = 3.0
-        
-        def task():
-            try:
-                provider = config["provider"]
-                self._log(f"> Đang tải đề bài (Provider: {provider})...")
-                qs = self.api.get_questions(assign_id)
-                total = len(qs)
-                self._log(f"> Tìm thấy {total} câu hỏi.")
-                self.after(0, lambda: self.lbl_progress.configure(text=f"Tiến độ: 0/{total} câu hỏi"))
-                delay_per_q = 0.0
-                if pacing == "2": delay_per_q = max(0.5, (total_mins * 60) / total)
-                elif pacing == "3": delay_per_q = delay_sec
-                
-                solver = AISolver(provider, config["api_key"], config["model"], rpd_limit=config.get("limits", {}).get("rpd", 1500))
-                solver.used_today = config.get("used_today", 0)
-                payloads = []
-                
-                for i, q in enumerate(qs):
-                    if not self.running: break
-                    t0 = time.time()
-                    self._log(f"[{i+1}/{total}] Đang giải ({q.qtype}): {clean_display_text(q.content)[:40]}...")
-                    try:
-                        payload = solver.solve(q)
-                        payloads.append(payload)
-                        config["used_today"] = solver.used_today
-                        for idx, cfg in enumerate(self.ai_config):
-                            if cfg["provider"] == provider and cfg["api_key"] == config["api_key"]:
-                                self.ai_config[idx]["used_today"] = solver.used_today
-                                break
-                        q_time = time.time() - t0
-                        ans_display = ""
-                        sent_id = ""
-                        if q.qtype == "choice":
-                            chosen_id = payload.get("optionId")
-                            sent_id = str(chosen_id)
-                            for idx, opt in enumerate(q.options):
-                                if opt["id"] == chosen_id: ans_display = chr(65 + idx); break
-                        elif q.qtype == "true_false":
-                            ans_display = ", ".join(["Đ" if c == "true" else "S" for c in payload.get("choices", [])])
-                            sent_id = str(payload.get("choices", []))
-                        elif q.qtype == "text":
-                            ans_display = payload.get("text", "")
-                            sent_id = ans_display
-                        self._log(f"  -> Đáp án: {ans_display} ({q_time:.1f}s)")
-                        detail_text = f"[Câu {q.index}/{total}] - {q.qtype.upper()}\nNội dung: {clean_display_text(q.content)}\n=> AI chọn: {ans_display}\n=> ID gửi S3: {sent_id}\n=> Thời gian: {q_time:.2f}s\n" + "-"*40 + "\n\n"
-                        self._log_detail(detail_text)
-                    except Exception as api_err:
-                        err_msg = str(api_err)
-                        self._log(f"  -> [LỖI API]: {err_msg}")
-                        if "429" in err_msg or "quota" in err_msg.lower():
-                            self._log("  -> Đã hết hạn mức. Dừng.")
-                            self.running = False
-                            break
-                        if q.qtype == "choice" and q.options: payloads.append({"stepId": q.id, "type": "choice", "optionId": q.options[0]["id"]})
-                        elif q.qtype == "true_false": payloads.append({"stepId": q.id, "type": "true_false", "choices": ["true"] * len(q.options)})
-                        else: payloads.append({"stepId": q.id, "type": "text", "text": "0"})
-                    self.after(0, lambda p=(i+1)/total, cur=i+1, tot=total: [self.progress.set(p), self.lbl_progress.configure(text=f"Tiến độ: {cur}/{tot} câu hỏi")])
-                    spent = time.time() - t0
-                    if delay_per_q > spent and self.running: time.sleep(delay_per_q - spent)
-                
-                if self.running:
-                    self._log("\n> Đang upload đáp án lên S3...")
-                    if self.api.upload_answers(assign_id, payloads):
-                        self._log("> Upload thành công!")
-                        if sub_mode == "3":
-                            self._log("\n> [CHẾ ĐỘ] KHÔNG nộp bài. Đáp án đã lưu.")
-                            self.after(0, lambda: self.lbl_progress.configure(text="Hoàn tất (Chưa nộp)"))
-                            return
-                        wait_seconds = int(wait_mins * 60) if sub_mode == "2" else 0
-                        if sub_mode in ("1", "2") and wait_seconds < 180: wait_seconds = 180
-                        if wait_seconds > 0:
-                            self._log(f"> Chờ {wait_seconds/60:.1f} phút trước khi nộp...")
-                            for r in range(wait_seconds, 0, -1):
-                                if not self.running: break
-                                self.after(0, lambda rem=r: self.lbl_progress.configure(text=f"Đang chờ nộp bài: {rem//60:02d}:{rem%60:02d}..."))
-                                time.sleep(1)
-                        if self.running:
-                            self._log("> Đang nộp bài...")
-                            self.after(0, lambda: self.lbl_progress.configure(text="Đang nộp bài..."))
-                            res = self.api.submit(assign_id)
-                            if res["success"]: 
-                                self._log("🎉 NỘP BÀI THÀNH CÔNG!")
-                                self.after(0, lambda: self.lbl_progress.configure(text="Đã hoàn tất!"))
-                            else: self._log(f"Lỗi nộp: {res.get('message')}")
-                    else: self._log("> Upload thất bại.")
-            except Exception as e: self._log(f"\n[LỖI HỆ THỐNG]: {e}")
-            finally:
-                self.after(0, lambda: self.btn_stop.configure(state="disabled"))
-                self.after(0, self._refresh_key_list)
-                self._save_config()
-        threading.Thread(target=task, daemon=True).start()
-
-    def _update_timer(self):
-        if not self.timer_running: return
-        elapsed = int(time.time() - self.start_time)
-        self.lbl_timer.configure(text=f"⏱️ {elapsed//60:02d}:{elapsed%60:02d}")
-        self.after(1000, self._update_timer)
-
-    def _stop_solving(self):
-        self.running = False
-        self.timer_running = False
-        self._log("\n> Đã dừng theo yêu cầu.")
-        self.lbl_progress.configure(text="Đã dừng.")
-
-    def _log(self, msg):
-        if self.log_box.winfo_exists():
-            self.after(0, lambda: self.log_box.insert("end", msg + "\n"))
-            self.after(0, lambda: self.log_box.see("end"))
-        
-    def _log_detail(self, msg):
-        if self.log_detail_box.winfo_exists():
-            self.after(0, lambda: self.log_detail_box.insert("end", msg))
-            self.after(0, lambda: self.log_detail_box.see("end"))
-
-    def _show_account_manager(self):
-        self.account_dialog = ctk.CTkToplevel(self)
-        self.account_dialog.title("Quản lý tài khoản")
-        self.account_dialog.geometry("400x500")
-        self.account_dialog.configure(fg_color=BG)
-        self.account_dialog.attributes("-topmost", True)
-        self.account_dialog.grab_set()
-        self.account_dialog.update_idletasks()
-        x = self.winfo_x() + (self.winfo_width() - self.account_dialog.winfo_width()) // 2
-        y = self.winfo_y() + (self.winfo_height() - self.account_dialog.winfo_height()) // 2
-        self.account_dialog.geometry(f"+{x}+{y}")
-        self.acc_list_frame = ctk.CTkScrollableFrame(self.account_dialog, fg_color="transparent")
-        self.acc_list_frame.pack(fill="both", expand=True, padx=20, pady=20)
-        self._render_saved_accounts()
-
-    def _render_saved_accounts(self):
-        self._clear_frame(self.acc_list_frame)
-        accounts = self.api.get_saved_accounts()
-        for acc in accounts:
-            card = ctk.CTkFrame(self.acc_list_frame, fg_color=CARD, corner_radius=8, border_width=1, border_color=BORDER)
-            card.pack(fill="x", pady=5, padx=5)
-            name = acc.get("display_name") or acc.get("username")
-            ctk.CTkLabel(card, text=name, font=("Segoe UI", 14, "bold"), text_color=TEXT_P).pack(side="left", padx=15, pady=10)
-            ctk.CTkButton(card, text="Chọn", width=60, height=30, fg_color=ACCENT, command=lambda a=acc: self._switch_account(a)).pack(side="right", padx=10)
-        ctk.CTkButton(self.acc_list_frame, text="+ Thêm tài khoản", font=("Segoe UI", 14, "bold"), height=40, fg_color=SUCCESS, hover_color="#059669", command=self._add_new_account_ui).pack(fill="x", pady=20, padx=5)
-
-    def _switch_account(self, acc):
-        username = acc.get("username")
-        try: password = base64.b64decode(acc.get("password")).decode()
-        except: password = ""
-        self.account_dialog.destroy()
-        self.show_page("login")
-        self.entry_user.delete(0, "end")
-        self.entry_user.insert(0, username)
-        self.entry_pass.delete(0, "end")
-        self.entry_pass.insert(0, password)
-        self._do_login()
-
-    def _add_new_account_ui(self):
-        self.account_dialog.destroy()
-        self.show_page("login")
-        self.entry_user.delete(0, "end")
-        self.entry_pass.delete(0, "end")
-        self.lbl_login.configure(text="")
-        self.btn_back_login.pack(fill="x", pady=(0, 10))
-        self.btn_login.configure(text="Đăng nhập tài khoản mới")
-
-    def _cancel_add_account(self):
-        self.btn_back_login.pack_forget()
-        self.btn_login.configure(text="Đăng nhập ngay")
-        self.entry_user.delete(0, "end")
-        self.entry_pass.delete(0, "end")
-        self.show_page("assign")
-
-if __name__ == "__main__":
-    app = App()
-    app.mainloop()
-'''
+# Chúng ta sẽ không ghi đè gui.py vì giao diện hiện tại của bạn đã ổn.
+# Chỉ cập nhật các file logic bên dưới.
 
 # ============================================================
 # TIẾN TRÌNH GHI FILE
 # ============================================================
 def write_all_files():
-    print("=" * 60)
-    print(" ĐANG CẬP NHẬT V4.0 - NÂNG CẤP SHORT ANSWER & ĐỔI DẤU PHẨY")
-    print("=" * 60)
+    print("=" * 64)
+    print(" FIX V6.7 — ĐỒNG BỘ 100% API TỪ TOOL_ONLUYEN (LẤY ĐỦ 31 CÂU)")
+    print("=" * 64)
+    
     for name, content in FILES.items():
         path = BASE_DIR / name
+        if path.exists():
+            backup = path.with_suffix(path.suffix + ".bak")
+            backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+            print(f"  [BAK ] {backup.name}")
         path.write_text(content, encoding="utf-8")
-        print(f"  [OK] Đã ghi đè: {name}")
+        print(f"  [OK  ] {name}")
     
-    print("\n" + "=" * 60)
-    print(" HOÀN TẤT! Hãy chạy lệnh: python main.py")
-    print("=" * 60)
+    print("\n" + "=" * 64)
+    print(" HOÀN TẤT! Đã sửa lỗi bỏ sót câu hỏi bằng cách áp dụng đúng logic gốc.")
+    print(" Chạy: python main.py")
+    print("=" * 64)
 
 if __name__ == "__main__":
     write_all_files()

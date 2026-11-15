@@ -119,7 +119,7 @@ class App(ctk.CTk):
         self.user_menu.add_separator()
         self.user_menu.add_command(label="Đăng xuất", command=self._logout)
 
-        ctk.CTkLabel(bottom, text="v4.0.0 - Stable", font=("Segoe UI", 10), text_color=TEXT_S).pack(pady=(10, 0))
+        ctk.CTkLabel(bottom, text="v6.4.0 - Stable", font=("Segoe UI", 10), text_color=TEXT_S).pack(pady=(10, 0))
 
     def _show_user_menu(self, event):
         x = self.user_btn.winfo_rootx()
@@ -211,7 +211,11 @@ class App(ctk.CTk):
 
         list_frame = ctk.CTkFrame(self.pages["ai"], fg_color="transparent")
         list_frame.pack(fill="both", expand=True, padx=40)
-        ctk.CTkLabel(list_frame, text="Danh sách Key đang hoạt động", font=("Segoe UI", 16, "bold"), text_color=TEXT_P).pack(anchor="w", pady=(10, 10))
+        
+        header_row = ctk.CTkFrame(list_frame, fg_color="transparent")
+        header_row.pack(fill="x", pady=(10, 10))
+        ctk.CTkLabel(header_row, text="Danh sách Key đang hoạt động", font=("Segoe UI", 16, "bold"), text_color=TEXT_P).pack(side="left")
+        ctk.CTkButton(header_row, text="🔄 Check tất cả", width=120, height=32, fg_color=ACCENT, hover_color=ACCENT_HOVER, command=self._check_all_keys).pack(side="right")
         
         self.key_list_frame = ctk.CTkScrollableFrame(list_frame, fg_color="transparent")
         self.key_list_frame.pack(fill="both", expand=True)
@@ -438,18 +442,32 @@ class App(ctk.CTk):
         def task():
             solver = AISolver(p, k, m)
             info = solver.fetch_models_and_limits()
-            if "error" in info: return self.after(0, lambda: self._log_ui(f"Lỗi: {info['error']}", DANGER))
-            final_model = m if m else (info["models"][0] if info["models"] else solver._get_default_model())
+            err = info.get("error", "")
+            err_low = err.lower()
+            is_net_err = any(x in err_low for x in ["timeout", "timed out", "connection", "max retries", "httpsconnectionpool", "network"])
+            if "error" in info and not is_net_err:
+                return self.after(0, lambda e=err: self._log_ui(f"❌ Lỗi: {e}", DANGER))
+            final_model = m if m else ((info.get("models") or [solver._get_default_model()])[0])
             solver.model = final_model
-            is_ready, quota_msg = solver.check_quota()
+            is_ready, quota_msg = (False, f"Không kết nối được: {err[:80]}") if is_net_err else solver.check_quota()
             def update_ui():
                 today = datetime.now().strftime("%Y-%m-%d")
-                self.ai_config.append({"provider": p, "api_key": k, "model": final_model, "valid": is_ready, "status_msg": quota_msg, "limits": info["limits"], "used_today": 0, "last_date": today})
+                self.ai_config.append({
+                    "provider": p, "api_key": k, "model": final_model,
+                    "valid": is_ready, "status_msg": quota_msg,
+                    "limits": info.get("limits", {"rpm": 0, "rpd": 0}),
+                    "used_today": 0, "last_date": today
+                })
                 self._save_config()
                 self._refresh_key_list()
                 self.entry_api.delete(0, "end")
                 self.entry_model.delete(0, "end")
-                self._log_ui(f"Thêm thành công! Trạng thái: {quota_msg}", SUCCESS if is_ready else WARNING)
+                if is_net_err:
+                    self._log_ui("⚠️ Đã lưu key nhưng chưa xác thực được (lỗi mạng). Bấm 'Check' để thử lại.", WARNING)
+                elif is_ready:
+                    self._log_ui(f"✅ Thêm thành công! {quota_msg}", SUCCESS)
+                else:
+                    self._log_ui(f"⚠️ Đã lưu key. Trạng thái: {quota_msg}", WARNING)
             self.after(0, update_ui)
         threading.Thread(target=task, daemon=True).start()
 
@@ -480,18 +498,57 @@ class App(ctk.CTk):
         cfg = self.ai_config[idx]
         self._log_ui(f"Đang kiểm tra lại {cfg['provider'].upper()}...", ACCENT)
         def task():
-            solver = AISolver(cfg["provider"], cfg["api_key"], cfg["model"], rpd_limit=cfg["limits"].get("rpd", 1500))
+            limits = cfg.get("limits") or {}
+            solver = AISolver(cfg["provider"], cfg["api_key"], cfg.get("model", ""), rpd_limit=limits.get("rpd", 1500))
             solver.used_today = cfg.get("used_today", 0)
-            is_ready, quota_msg = solver.check_quota()
+            is_ready, quota_msg = False, "Không xác định"
+            for attempt in range(3):
+                is_ready, quota_msg = solver.check_quota()
+                ql = (quota_msg or "").lower()
+                if is_ready or not any(x in ql for x in ["timeout", "connection", "timed out", "max retries"]):
+                    break
+                time.sleep(2)
             def update_ui():
                 if idx < len(self.ai_config):
                     self.ai_config[idx]["valid"] = is_ready
                     self.ai_config[idx]["status_msg"] = quota_msg
-                    self.ai_config[idx]["model"] = solver.model
+                    if solver.model: self.ai_config[idx]["model"] = solver.model
                     self._save_config()
                     self._refresh_key_list()
                     self._log_ui(f"Cập nhật: {quota_msg}", SUCCESS if is_ready else DANGER)
             self.after(0, update_ui)
+        threading.Thread(target=task, daemon=True).start()
+
+    def _check_all_keys(self):
+        if not self.ai_config:
+            return messagebox.showinfo("Trống", "Chưa có key nào để check.")
+        self._log_ui("Đang check tất cả keys...", ACCENT)
+        def task():
+            results = []
+            for i, cfg in enumerate(list(self.ai_config)):
+                limits = cfg.get("limits") or {}
+                solver = AISolver(cfg["provider"], cfg["api_key"], cfg.get("model", ""), rpd_limit=limits.get("rpd", 1500))
+                solver.used_today = cfg.get("used_today", 0)
+                is_ready, msg = solver.check_quota()
+                for _ in range(2):
+                    ml = (msg or "").lower()
+                    if is_ready or not any(x in ml for x in ["timeout", "connection", "timed out", "max retries"]):
+                        break
+                    time.sleep(1.5)
+                    is_ready, msg = solver.check_quota()
+                results.append((i, solver, is_ready, msg))
+            def update():
+                ok = 0
+                for i, solver, is_ready, msg in results:
+                    if i < len(self.ai_config):
+                        self.ai_config[i]["valid"] = is_ready
+                        self.ai_config[i]["status_msg"] = msg
+                        if solver.model: self.ai_config[i]["model"] = solver.model
+                        if is_ready: ok += 1
+                self._save_config()
+                self._refresh_key_list()
+                self._log_ui(f"✅ {ok}/{len(results)} key hoạt động tốt.", SUCCESS if ok else DANGER)
+            self.after(0, update)
         threading.Thread(target=task, daemon=True).start()
 
     def _remove_key(self, idx):
@@ -526,6 +583,8 @@ class App(ctk.CTk):
         if use_api:
             valid_keys = [k for k in self.ai_config if k.get("valid") and k.get("provider") != "jev"]
             if not valid_keys: return messagebox.showerror("Lỗi", "Không có API Key hợp lệ nào.")
+            _prio = {"groq": 0, "gemini": 1, "openrouter": 2, "mistral": 3, "jev": 4, "xai": 10, "openai": 11}
+            valid_keys.sort(key=lambda k: _prio.get(k.get("provider", ""), 50))
             chosen_config = valid_keys[0]
         else:
             chosen_config = {"provider": "jev", "api_key": "", "model": "jev-classifier", "used_today": 0}
@@ -555,6 +614,8 @@ class App(ctk.CTk):
         
         def task():
             try:
+                failed_count = 0
+                failed_list = []
                 provider = config["provider"]
                 self._log(f"> Đang tải đề bài (Provider: {provider})...")
                 qs = self.api.get_questions(assign_id)
@@ -601,18 +662,24 @@ class App(ctk.CTk):
                     except Exception as api_err:
                         err_msg = str(api_err)
                         self._log(f"  -> [LỖI API]: {err_msg}")
+                        failed_count += 1
+                        failed_list.append((i+1, err_msg[:100]))
+                        self._log_detail(f"[Câu {i+1}/{total}] ❌ LỖI AI: {err_msg[:250]}\n" + "-"*40 + "\n\n")
                         if "429" in err_msg or "quota" in err_msg.lower():
                             self._log("  -> Đã hết hạn mức. Dừng.")
                             self.running = False
                             break
-                        if q.qtype == "choice" and q.options: payloads.append({"stepId": q.id, "type": "choice", "optionId": q.options[0]["id"]})
-                        elif q.qtype == "true_false": payloads.append({"stepId": q.id, "type": "true_false", "choices": ["true"] * len(q.options)})
-                        else: payloads.append({"stepId": q.id, "type": "text", "text": "0"})
                     self.after(0, lambda p=(i+1)/total, cur=i+1, tot=total: [self.progress.set(p), self.lbl_progress.configure(text=f"Tiến độ: {cur}/{tot} câu hỏi")])
                     spent = time.time() - t0
                     if delay_per_q > spent and self.running: time.sleep(delay_per_q - spent)
                 
                 if self.running:
+                    if failed_count > 0:
+                        self._log(f"\n> ⚠️ Có {failed_count}/{total} câu lỗi AI (sẽ bị coi là chưa làm).")
+                        if not self._ask_continue_with_errors(failed_count, total):
+                            self._log("> Người dùng chọn DỪNG — không upload, không nộp bài.")
+                            self.after(0, lambda: self.lbl_progress.configure(text="Đã dừng (không nộp)"))
+                            return
                     self._log("\n> Đang upload đáp án lên S3...")
                     if self.api.upload_answers(assign_id, payloads):
                         self._log("> Upload thành công!")
@@ -643,6 +710,24 @@ class App(ctk.CTk):
                 self.after(0, self._refresh_key_list)
                 self._save_config()
         threading.Thread(target=task, daemon=True).start()
+
+    def _ask_continue_with_errors(self, failed, total):
+        result = {"ok": False}
+        ev = threading.Event()
+        def ask():
+            try:
+                result["ok"] = messagebox.askyesno(
+                    "Có câu lỗi",
+                    f"AI không giải được {failed}/{total} câu (các câu này sẽ bị coi là chưa làm).\n\n"
+                    f"Bạn có muốn tiếp tục upload & nộp bài không?\n\n"
+                    f"• Yes = Tiếp tục nộp bài\n"
+                    f"• No  = Dừng để kiểm tra lại key"
+                )
+            finally:
+                ev.set()
+        self.after(0, ask)
+        ev.wait(timeout=300)
+        return result["ok"]
 
     def _update_timer(self):
         if not self.timer_running: return
