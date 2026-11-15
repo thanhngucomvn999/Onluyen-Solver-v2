@@ -22,7 +22,6 @@ except Exception: pass
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
-# Bảng màu hiện đại (Tailwind Slate & Blue)
 BG = "#0F172A"; SIDEBAR = "#1E293B"; CARD = "#1E293B"; HOVER = "#334155"; BORDER = "#334155"
 ACCENT = "#3B82F6"; ACCENT_HOVER = "#2563EB"; TEXT_P = "#F8FAFC"; TEXT_S = "#94A3B8"
 DANGER = "#EF4444"; SUCCESS = "#10B981"; WARNING = "#F59E0B"
@@ -40,11 +39,9 @@ class App(ctk.CTk):
         self.running = False
         self.ai_config = self._load_config()
         
-        # Timer State
         self.start_time = 0
         self.timer_running = False
         
-        # Settings
         self.pacing_mode = ctk.StringVar(value="1")
         self.total_time_minutes = ctk.DoubleVar(value=10.0)
         self.delay_per_question = ctk.DoubleVar(value=5.0)
@@ -81,7 +78,6 @@ class App(ctk.CTk):
             if cfg.get("last_date") != today:
                 cfg["used_today"] = 0
                 cfg["last_date"] = today
-                
         with open(CONFIG_FILE, "w") as f: json.dump(self.ai_config, f, indent=4)
 
     def _clear_frame(self, frame):
@@ -92,7 +88,7 @@ class App(ctk.CTk):
     def _build_sidebar(self):
         self.sidebar = ctk.CTkFrame(self, width=250, corner_radius=0, fg_color=SIDEBAR)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
-        self.sidebar.grid_rowconfigure(6, weight=1) # Tăng index do có thêm 1 menu
+        self.sidebar.grid_rowconfigure(6, weight=1)
 
         logo = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         logo.grid(row=0, column=0, padx=25, pady=(40, 40), sticky="w")
@@ -100,7 +96,6 @@ class App(ctk.CTk):
         ctk.CTkLabel(logo, text="PRO", font=("Segoe UI", 24), text_color=TEXT_P).pack(side="left", padx=(5,0))
 
         self.nav_btns = {}
-        # Thêm menu "history"
         menus = [("assign", "📚  Bài tập"), ("history", "📊  Bài đã nộp"), ("ai", "🤖  Cấu hình AI"), ("solve", "🚀  Tiến trình"), ("settings", "⚙️  Cài đặt")]
         
         for i, (key, text) in enumerate(menus, start=1):
@@ -110,7 +105,7 @@ class App(ctk.CTk):
             self.nav_btns[key] = btn
 
         bottom = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        bottom.grid(row=7, column=0, padx=15, pady=20, sticky="ew") # Đổi thành row=7
+        bottom.grid(row=7, column=0, padx=15, pady=20, sticky="ew")
         
         self.user_frame = ctk.CTkFrame(bottom, fg_color=CARD, corner_radius=8, border_width=1, border_color=BORDER)
         self.user_frame.pack(fill="x")
@@ -124,7 +119,7 @@ class App(ctk.CTk):
         self.user_menu.add_separator()
         self.user_menu.add_command(label="Đăng xuất", command=self._logout)
 
-        ctk.CTkLabel(bottom, text="v3.1.0 - Dashboard", font=("Segoe UI", 10), text_color=TEXT_S).pack(pady=(10, 0))
+        ctk.CTkLabel(bottom, text="v4.0.0 - Stable", font=("Segoe UI", 10), text_color=TEXT_S).pack(pady=(10, 0))
 
     def _show_user_menu(self, event):
         x = self.user_btn.winfo_rootx()
@@ -157,7 +152,7 @@ class App(ctk.CTk):
         
         self.btn_back_login = ctk.CTkButton(self.login_form, text="Quay lại", font=("Segoe UI", 13), fg_color="transparent", hover_color=HOVER, text_color=TEXT_S, command=self._cancel_add_account)
 
-        # --- ASSIGN (TODO) ---
+        # --- ASSIGN ---
         self.pages["assign"] = ctk.CTkFrame(self.content, fg_color=BG, corner_radius=0)
         h_assign = ctk.CTkFrame(self.pages["assign"], fg_color="transparent")
         h_assign.pack(fill="x", padx=40, pady=(40, 20))
@@ -166,7 +161,7 @@ class App(ctk.CTk):
         self.assign_scroll = ctk.CTkScrollableFrame(self.pages["assign"], fg_color="transparent")
         self.assign_scroll.pack(fill="both", expand=True, padx=40, pady=(0, 30))
 
-        # --- HISTORY (DONE) ---
+        # --- HISTORY ---
         self.pages["history"] = ctk.CTkFrame(self.content, fg_color=BG, corner_radius=0)
         h_history = ctk.CTkFrame(self.pages["history"], fg_color="transparent")
         h_history.pack(fill="x", padx=40, pady=(40, 20))
@@ -222,34 +217,25 @@ class App(ctk.CTk):
         self.key_list_frame.pack(fill="both", expand=True)
         self._refresh_key_list()
 
-        # --- SOLVE (DASHBOARD) ---
+        # --- SOLVE ---
         self.pages["solve"] = ctk.CTkFrame(self.content, fg_color=BG, corner_radius=0)
-        
-        # Header Info Bài Tập
         self.info_card = ctk.CTkFrame(self.pages["solve"], fg_color=CARD, corner_radius=12, border_width=1, border_color=BORDER)
         self.info_card.pack(fill="x", padx=40, pady=(30, 20))
-        
         info_inner = ctk.CTkFrame(self.info_card, fg_color="transparent")
         info_inner.pack(fill="x", padx=20, pady=15)
-        
         self.lbl_bai_hoc = ctk.CTkLabel(info_inner, text="Chưa chọn bài tập", font=("Segoe UI", 20, "bold"), text_color=TEXT_P, anchor="w")
         self.lbl_bai_hoc.pack(side="left")
-        
         self.lbl_timer = ctk.CTkLabel(info_inner, text="⏱️ 00:00", font=("Consolas", 22, "bold"), text_color=ACCENT)
         self.lbl_timer.pack(side="right")
 
-        # Thanh Tiến trình
         progress_frame = ctk.CTkFrame(self.pages["solve"], fg_color="transparent")
         progress_frame.pack(fill="x", padx=40, pady=(0, 10))
-        
         self.lbl_progress = ctk.CTkLabel(progress_frame, text="Đang chờ lệnh...", font=("Segoe UI", 13), text_color=TEXT_S)
         self.lbl_progress.pack(anchor="w")
-        
         self.progress = ctk.CTkProgressBar(progress_frame, height=10, corner_radius=5, progress_color=ACCENT, fg_color=BORDER)
         self.progress.pack(fill="x", pady=5)
         self.progress.set(0)
         
-        # Split View Log
         split_frame = ctk.CTkFrame(self.pages["solve"], fg_color="transparent")
         split_frame.pack(fill="both", expand=True, padx=40, pady=10)
         split_frame.grid_columnconfigure(0, weight=4)
@@ -281,30 +267,24 @@ class App(ctk.CTk):
         s_inner.pack(pady=20, padx=20, fill="x")
         
         ctk.CTkLabel(s_inner, text="1. Phân bổ thời gian", font=("Segoe UI", 16, "bold"), text_color=TEXT_P).pack(anchor="w", pady=(0, 10))
-        
         ctk.CTkRadioButton(s_inner, text="Giải tốc độ tối đa (làm ngay không chờ)", variable=self.pacing_mode, value="1", font=("Segoe UI", 14)).pack(anchor="w", pady=5)
-        
         f_div = ctk.CTkFrame(s_inner, fg_color="transparent")
         f_div.pack(anchor="w", pady=5)
         ctk.CTkRadioButton(f_div, text="Chia đều tổng thời gian làm bài (phút):", variable=self.pacing_mode, value="2", font=("Segoe UI", 14)).pack(side="left")
         ctk.CTkEntry(f_div, textvariable=self.total_time_minutes, width=60).pack(side="left", padx=10)
-        
         f_fix = ctk.CTkFrame(s_inner, fg_color="transparent")
         f_fix.pack(anchor="w", pady=5)
         ctk.CTkRadioButton(f_fix, text="Cố định thời gian mỗi câu (giây):", variable=self.pacing_mode, value="3", font=("Segoe UI", 14)).pack(side="left")
         ctk.CTkEntry(f_fix, textvariable=self.delay_per_question, width=60).pack(side="left", padx=10)
 
         ctk.CTkLabel(s_inner, text="2. Chế độ nộp bài", font=("Segoe UI", 16, "bold"), text_color=TEXT_P).pack(anchor="w", pady=(20, 10))
-        
         f_auto = ctk.CTkFrame(s_inner, fg_color="transparent")
         f_auto.pack(anchor="w", pady=5)
         ctk.CTkRadioButton(f_auto, text="Tự động nộp bài sau khi làm xong (đảm bảo đủ 3 phút):", variable=self.submit_mode, value="1", font=("Segoe UI", 14)).pack(side="left")
-        
         f_timed = ctk.CTkFrame(s_inner, fg_color="transparent")
         f_timed.pack(anchor="w", pady=5)
         ctk.CTkRadioButton(f_timed, text="Hẹn giờ nộp bài (đợi đủ số phút):", variable=self.submit_mode, value="2", font=("Segoe UI", 14)).pack(side="left")
         ctk.CTkEntry(f_timed, textvariable=self.submit_wait_minutes, width=60).pack(side="left", padx=10)
-        
         ctk.CTkRadioButton(s_inner, text="KHÔNG nộp bài (Chỉ lưu đáp án lên server)", variable=self.submit_mode, value="3", font=("Segoe UI", 14)).pack(anchor="w", pady=5)
 
     # --- LOGIC ĐIỀU HƯỚNG ---
@@ -323,9 +303,7 @@ class App(ctk.CTk):
         if not u or not p:
             self.lbl_login.configure(text="Vui lòng nhập đủ Email/SĐT và Mật khẩu", text_color=DANGER)
             return
-            
         self.btn_login.configure(state="disabled", text="Đang xử lý...")
-        
         def task():
             try:
                 self.api.login(u, p)
@@ -334,17 +312,14 @@ class App(ctk.CTk):
                 err_msg = str(e)
                 self.after(0, lambda: self.lbl_login.configure(text=err_msg, text_color=DANGER))
                 self.after(0, lambda: self.btn_login.configure(state="normal", text="Đăng nhập ngay"))
-                
         threading.Thread(target=task, daemon=True).start()
 
     def _login_success(self):
         self.btn_login.configure(state="normal", text="Đăng nhập ngay")
         name = self.api.display_name or self.api.email
         self.user_btn.configure(text=f"👤 {name} ▾")
-        
         if hasattr(self, 'account_dialog') and self.account_dialog.winfo_exists():
             self.account_dialog.destroy()
-            
         self.show_page("assign")
         self._load_assignments()
 
@@ -356,19 +331,13 @@ class App(ctk.CTk):
     def _load_assignments(self):
         self._clear_frame(self.assign_scroll)
         ctk.CTkLabel(self.assign_scroll, text="Đang tải...", text_color=TEXT_S).pack(pady=30)
-        
         def task():
             try:
-                # Cố gắng lấy bài chưa nộp
-                try:
-                    assigns = self.api.get_assignments(filter_status="todo")
+                try: assigns = self.api.get_assignments(filter_status="todo")
                 except TypeError:
                     assigns = self.api.get_assignments()
-                    # Lọc an toàn nếu API không hỗ trợ filter
                     assigns = [a for a in assigns if getattr(a, 'status', 0) not in (2, 3) and not getattr(a, 'completed', False)]
-
-                if self.pages["assign"].winfo_exists():
-                    self.after(0, lambda: self._render_assignments(assigns))
+                if self.pages["assign"].winfo_exists(): self.after(0, lambda: self._render_assignments(assigns))
             except SessionExpiredError:
                 self.after(0, lambda: messagebox.showerror("Hết phiên", "Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại."))
                 self.after(0, self._logout)
@@ -392,24 +361,18 @@ class App(ctk.CTk):
             ctk.CTkLabel(info, text=f"Môn: {a.subject}", font=("Segoe UI", 13), text_color=TEXT_S, anchor="w").pack(fill="x")
             ctk.CTkButton(card, text="Làm bài", width=100, height=38, fg_color=ACCENT, hover_color=ACCENT_HOVER, corner_radius=8, command=lambda title=a.title, id=a.assign_id: self._show_mode_dialog(title, id)).pack(side="right", padx=20)
 
-    # --- HISTORY LOGIC ---
     def _load_history(self):
         self._clear_frame(self.history_scroll)
         ctk.CTkLabel(self.history_scroll, text="Đang tải...", text_color=TEXT_S).pack(pady=30)
-        
         def task():
             try:
-                # Lấy danh sách bài đã nộp
-                try:
-                    assigns = self.api.get_assignments(filter_status="done")
+                try: assigns = self.api.get_assignments(filter_status="done")
                 except TypeError:
                     assigns = self.api.get_assignments()
                     assigns = [a for a in assigns if getattr(a, 'status', 0) in (2, 3) or getattr(a, 'completed', False)]
-
-                if self.pages["history"].winfo_exists():
-                    self.after(0, lambda: self._render_history(assigns))
+                if self.pages["history"].winfo_exists(): self.after(0, lambda: self._render_history(assigns))
             except SessionExpiredError:
-                self.after(0, lambda: messagebox.showerror("Hết phiên", "Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại."))
+                self.after(0, lambda: messagebox.showerror("Hết phiên", "Phiên đăng nhập đã hết hạn."))
                 self.after(0, self._logout)
             except Exception as e:
                 err_msg = str(e)
@@ -429,17 +392,10 @@ class App(ctk.CTk):
             info.pack(side="left", padx=20, pady=15, fill="x", expand=True)
             ctk.CTkLabel(info, text=a.title, font=("Segoe UI", 16, "bold"), text_color=TEXT_P, anchor="w").pack(fill="x")
             ctk.CTkLabel(info, text=f"Môn: {a.subject}", font=("Segoe UI", 13), text_color=TEXT_S, anchor="w").pack(fill="x")
-            
-            # Lấy điểm (tùy thuộc vào model trả về)
-            score = getattr(a, 'score', None)
-            if score is None:
-                score = getattr(a, 'totalScore', None)
-                
+            score = getattr(a, 'score', None) or getattr(a, 'totalScore', None)
             score_str = f"{score}/10" if score is not None else "Đã nộp"
-            
             ctk.CTkLabel(card, text=score_str, font=("Segoe UI", 18, "bold"), text_color=SUCCESS).pack(side="right", padx=20)
 
-    # --- AI LOGIC ---
     def _on_provider_change(self, choice):
         if choice == "jev":
             self.entry_api.configure(state="disabled", placeholder_text="Không cần API Key")
@@ -447,121 +403,75 @@ class App(ctk.CTk):
         else:
             self.entry_api.configure(state="normal", placeholder_text="Nhập API Key...")
             self.lbl_api.configure(text="API Key:")
-            
         notes = {
-            "gemini": "🔗 generativelanguage.googleapis.com | Khuyên dùng model: gemini-3.8-flash",
+            "gemini": "🔗 generativelanguage.googleapis.com | Khuyên dùng model: gemini-1.5-flash",
             "groq": "🔗 api.groq.com | Lấy key tại console.groq.com",
             "openrouter": "🔗 openrouter.ai | Key bắt đầu bằng 'sk-or-...'",
             "mistral": "🔗 api.mistral.ai | Key lấy từ console.mistral.ai",
             "jev": "🔗 classifier.dev | Miễn phí, độ chính xác thấp, không cần API Key"
         }
-        if hasattr(self, 'lbl_provider_note'):
-            self.lbl_provider_note.configure(text=notes.get(choice, ""))
+        if hasattr(self, 'lbl_provider_note'): self.lbl_provider_note.configure(text=notes.get(choice, ""))
 
     def _log_ui(self, msg, color=TEXT_S):
         if hasattr(self, 'lbl_ai_status') and self.lbl_ai_status.winfo_exists():
             self.after(0, lambda: self.lbl_ai_status.configure(text=msg, text_color=color))
 
     def _test_api_key(self):
-        p = self.provider_var.get()
-        k = self.entry_api.get().strip()
-        if p != "jev" and not k:
-            messagebox.showwarning("Thiếu Key", "Vui lòng nhập API Key để test.")
-            return
-            
+        p, k = self.provider_var.get(), self.entry_api.get().strip()
+        if p != "jev" and not k: return messagebox.showwarning("Thiếu Key", "Vui lòng nhập API Key để test.")
         self._log_ui("Đang kiểm tra Key...", ACCENT)
-        
         def task():
             solver = AISolver(p, k)
             info = solver.fetch_models_and_limits()
-            if "error" in info:
-                self.after(0, lambda: self._log_ui(f"Lỗi: {info['error']}", DANGER))
-                return
-                
+            if "error" in info: return self.after(0, lambda: self._log_ui(f"Lỗi: {info['error']}", DANGER))
             models = info.get("models", [])
-            if not models and p != "jev":
-                self.after(0, lambda: self._log_ui("Key hợp lệ nhưng không lấy được model.", DANGER))
-                return
-                
+            if not models and p != "jev": return self.after(0, lambda: self._log_ui("Key hợp lệ nhưng không lấy được model.", DANGER))
             best_model = models[0] if models else ""
             self.after(0, lambda: self.entry_model.delete(0, "end") or self.entry_model.insert(0, best_model))
             self.after(0, lambda: self._log_ui(f"✅ Key OK! Model khuyên dùng: {best_model}", SUCCESS))
-            
         threading.Thread(target=task, daemon=True).start()
 
     def _add_key(self):
-        p = self.provider_var.get()
-        k = self.entry_api.get().strip()
-        m = self.entry_model.get().strip()
-        
-        if p != "jev" and not k:
-            messagebox.showerror("Lỗi", "Vui lòng nhập API Key.")
-            return
-            
+        p, k, m = self.provider_var.get(), self.entry_api.get().strip(), self.entry_model.get().strip()
+        if p != "jev" and not k: return messagebox.showerror("Lỗi", "Vui lòng nhập API Key.")
         self._log_ui("Đang xác thực và thêm Key...", ACCENT)
-        
         def task():
             solver = AISolver(p, k, m)
             info = solver.fetch_models_and_limits()
-            
-            if "error" in info:
-                err = info['error']
-                self.after(0, lambda: self._log_ui(f"Lỗi: {err}", DANGER))
-                return
-                
+            if "error" in info: return self.after(0, lambda: self._log_ui(f"Lỗi: {info['error']}", DANGER))
             final_model = m if m else (info["models"][0] if info["models"] else solver._get_default_model())
             solver.model = final_model
-            
             is_ready, quota_msg = solver.check_quota()
-            
             def update_ui():
                 today = datetime.now().strftime("%Y-%m-%d")
-                self.ai_config.append({
-                    "provider": p, 
-                    "api_key": k, 
-                    "model": final_model, 
-                    "valid": is_ready,
-                    "status_msg": quota_msg,
-                    "limits": info["limits"],
-                    "used_today": 0,
-                    "last_date": today
-                })
+                self.ai_config.append({"provider": p, "api_key": k, "model": final_model, "valid": is_ready, "status_msg": quota_msg, "limits": info["limits"], "used_today": 0, "last_date": today})
                 self._save_config()
                 self._refresh_key_list()
                 self.entry_api.delete(0, "end")
                 self.entry_model.delete(0, "end")
                 self._log_ui(f"Thêm thành công! Trạng thái: {quota_msg}", SUCCESS if is_ready else WARNING)
-                    
             self.after(0, update_ui)
-            
         threading.Thread(target=task, daemon=True).start()
 
     def _refresh_key_list(self):
         self._clear_frame(self.key_list_frame)
-        
         if not self.ai_config:
             ctk.CTkLabel(self.key_list_frame, text="Chưa có API Key nào. Hãy thêm ở trên.", text_color=TEXT_S).pack(pady=20)
             return
-            
         for i, cfg in enumerate(self.ai_config):
             card = ctk.CTkFrame(self.key_list_frame, fg_color=CARD, corner_radius=8, border_width=1, border_color=BORDER)
             card.pack(fill="x", pady=5, padx=5)
-            
             status_msg = cfg.get("status_msg", "Chưa kiểm tra")
             is_valid = cfg.get("valid", False)
             color = SUCCESS if is_valid else WARNING
             if "Lỗi" in status_msg or "Hết" in status_msg: color = DANGER
-            
             model_str = cfg.get('model') or "Mặc định"
             limits = cfg.get("limits", {})
             used = cfg.get("used_today", 0)
-            
             limit_str = f"({limits.get('rpm', '?')} RPM / {limits.get('rpd', '?')} RPD) - Đã dùng: {used}" if limits else ""
             info = f"[{cfg['provider'].upper()}] {model_str} {limit_str}"
-            
             ctk.CTkLabel(card, text=info, font=("Segoe UI", 14, "bold"), text_color=TEXT_P).pack(side="left", padx=15, pady=10)
             ctk.CTkLabel(card, text=status_msg, font=("Segoe UI", 12, "bold"), text_color=color).pack(side="left", padx=10)
-            
             ctk.CTkButton(card, text="Xóa", width=50, height=30, fg_color="transparent", border_width=1, border_color=DANGER, text_color=DANGER, hover_color="#450a0a", command=lambda idx=i: self._remove_key(idx)).pack(side="right", padx=5)
             ctk.CTkButton(card, text="Check", width=60, height=30, fg_color="transparent", border_width=1, border_color=ACCENT, text_color=ACCENT, hover_color="#1e3a8a", command=lambda idx=i: self._check_key_quota(idx)).pack(side="right", padx=5)
 
@@ -569,12 +479,10 @@ class App(ctk.CTk):
         if idx >= len(self.ai_config): return
         cfg = self.ai_config[idx]
         self._log_ui(f"Đang kiểm tra lại {cfg['provider'].upper()}...", ACCENT)
-        
         def task():
             solver = AISolver(cfg["provider"], cfg["api_key"], cfg["model"], rpd_limit=cfg["limits"].get("rpd", 1500))
             solver.used_today = cfg.get("used_today", 0)
             is_ready, quota_msg = solver.check_quota()
-            
             def update_ui():
                 if idx < len(self.ai_config):
                     self.ai_config[idx]["valid"] = is_ready
@@ -583,9 +491,7 @@ class App(ctk.CTk):
                     self._save_config()
                     self._refresh_key_list()
                     self._log_ui(f"Cập nhật: {quota_msg}", SUCCESS if is_ready else DANGER)
-                
             self.after(0, update_ui)
-            
         threading.Thread(target=task, daemon=True).start()
 
     def _remove_key(self, idx):
@@ -601,38 +507,28 @@ class App(ctk.CTk):
         dialog.configure(fg_color=BG)
         dialog.attributes("-topmost", True)
         dialog.grab_set()
-        
         dialog.update_idletasks()
         x = self.winfo_x() + (self.winfo_width() - dialog.winfo_width()) // 2
         y = self.winfo_y() + (self.winfo_height() - dialog.winfo_height()) // 2
         dialog.geometry(f"+{x}+{y}")
-
         ctk.CTkLabel(dialog, text="CHỌN CHẾ ĐỘ GIẢI BÀI", font=("Segoe UI", 18, "bold"), text_color=TEXT_P).pack(pady=(20, 5))
         ctk.CTkLabel(dialog, text=title, font=("Segoe UI", 13), text_color=ACCENT).pack(pady=(0, 15))
-        
         has_api_key = any(k.get("valid") for k in self.ai_config if k.get("provider") != "jev")
-        
         btn1 = ctk.CTkButton(dialog, text="1. Sử dụng API Key (AI Mạnh)\nĐộ chính xác cao, có phân tích từng bước", font=("Segoe UI", 14), height=60, fg_color=ACCENT, hover_color=ACCENT_HOVER, command=lambda: self._start_solving(title, assign_id, True, dialog))
         btn1.pack(fill="x", padx=30, pady=8)
         if not has_api_key: btn1.configure(state="disabled", text="1. Sử dụng API Key (Chưa cài đặt)\nHãy vào Cấu hình AI để thêm Key")
-        
         btn2 = ctk.CTkButton(dialog, text="2. Không dùng API Key (Miễn phí)\nDùng Jev Classifier, chính xác thấp hơn", font=("Segoe UI", 14), height=60, fg_color="#4B5563", hover_color="#374151", command=lambda: self._start_solving(title, assign_id, False, dialog))
         btn2.pack(fill="x", padx=30, pady=8)
-        
         ctk.CTkButton(dialog, text="Hủy", font=("Segoe UI", 13), fg_color="transparent", hover_color=HOVER, text_color=TEXT_S, command=dialog.destroy).pack(pady=(10, 15))
 
     def _start_solving(self, title, assign_id, use_api: bool, dialog):
         dialog.destroy()
-        
         if use_api:
             valid_keys = [k for k in self.ai_config if k.get("valid") and k.get("provider") != "jev"]
-            if not valid_keys:
-                messagebox.showerror("Lỗi", "Không có API Key hợp lệ nào.")
-                return
+            if not valid_keys: return messagebox.showerror("Lỗi", "Không có API Key hợp lệ nào.")
             chosen_config = valid_keys[0]
         else:
             chosen_config = {"provider": "jev", "api_key": "", "model": "jev-classifier", "used_today": 0}
-            
         self.show_page("solve")
         self._run_solver(title, assign_id, chosen_config)
 
@@ -642,19 +538,14 @@ class App(ctk.CTk):
         self.log_box.delete("1.0", "end")
         self.log_detail_box.delete("1.0", "end")
         self.progress.set(0)
-        
-        # Update UI Header
         self.lbl_bai_hoc.configure(text=f"{title}\nID: {assign_id}")
         self.lbl_progress.configure(text="Đang khởi tạo...")
-        
-        # Bắt đầu đồng hồ
         self.start_time = time.time()
         self.timer_running = True
         self._update_timer()
         
         pacing = self.pacing_mode.get()
         sub_mode = self.submit_mode.get()
-        
         try: total_mins = float(self.total_time_minutes.get())
         except: total_mins = 10.0
         try: delay_sec = float(self.delay_per_question.get())
@@ -670,106 +561,73 @@ class App(ctk.CTk):
                 total = len(qs)
                 self._log(f"> Tìm thấy {total} câu hỏi.")
                 self.after(0, lambda: self.lbl_progress.configure(text=f"Tiến độ: 0/{total} câu hỏi"))
-                
                 delay_per_q = 0.0
-                if pacing == "2":
-                    delay_per_q = max(0.5, (total_mins * 60) / total)
-                    self._log(f"> [CẤU HÌNH] Chia đều tổng {total_mins} phút -> ~{delay_per_q:.1f}s/câu.")
-                elif pacing == "3":
-                    delay_per_q = delay_sec
-                    self._log(f"> [CẤU HÌNH] Cố định {delay_per_q}s/câu (Dự kiến: {delay_per_q * total / 60:.1f} phút).")
+                if pacing == "2": delay_per_q = max(0.5, (total_mins * 60) / total)
+                elif pacing == "3": delay_per_q = delay_sec
                 
                 solver = AISolver(provider, config["api_key"], config["model"], rpd_limit=config.get("limits", {}).get("rpd", 1500))
                 solver.used_today = config.get("used_today", 0)
-                
                 payloads = []
                 
                 for i, q in enumerate(qs):
                     if not self.running: break
-                    
                     t0 = time.time()
                     self._log(f"[{i+1}/{total}] Đang giải ({q.qtype}): {clean_display_text(q.content)[:40]}...")
-                    
                     try:
                         payload = solver.solve(q)
                         payloads.append(payload)
-                        
                         config["used_today"] = solver.used_today
                         for idx, cfg in enumerate(self.ai_config):
                             if cfg["provider"] == provider and cfg["api_key"] == config["api_key"]:
                                 self.ai_config[idx]["used_today"] = solver.used_today
                                 break
-                        
                         q_time = time.time() - t0
-                        
                         ans_display = ""
                         sent_id = ""
                         if q.qtype == "choice":
                             chosen_id = payload.get("optionId")
                             sent_id = str(chosen_id)
                             for idx, opt in enumerate(q.options):
-                                if opt["id"] == chosen_id:
-                                    ans_display = chr(65 + idx)
-                                    break
+                                if opt["id"] == chosen_id: ans_display = chr(65 + idx); break
                         elif q.qtype == "true_false":
                             ans_display = ", ".join(["Đ" if c == "true" else "S" for c in payload.get("choices", [])])
                             sent_id = str(payload.get("choices", []))
                         elif q.qtype == "text":
                             ans_display = payload.get("text", "")
                             sent_id = ans_display
-                            
-                        self._log(f"  -> Đáp án AI chọn: {ans_display} (ID: {sent_id}) ({q_time:.1f}s)")
-                        
-                        detail_text = f"[Câu {q.index}/{total}] - {q.qtype.upper()}\nNội dung: {clean_display_text(q.content)}\n"
-                        detail_text += f"=> AI chọn: {ans_display}\n=> ID gửi S3: {sent_id}\n=> Thời gian: {q_time:.2f}s\n" + "-"*40 + "\n\n"
+                        self._log(f"  -> Đáp án: {ans_display} ({q_time:.1f}s)")
+                        detail_text = f"[Câu {q.index}/{total}] - {q.qtype.upper()}\nNội dung: {clean_display_text(q.content)}\n=> AI chọn: {ans_display}\n=> ID gửi S3: {sent_id}\n=> Thời gian: {q_time:.2f}s\n" + "-"*40 + "\n\n"
                         self._log_detail(detail_text)
-                        
                     except Exception as api_err:
                         err_msg = str(api_err)
                         self._log(f"  -> [LỖI API]: {err_msg}")
-                        
                         if "429" in err_msg or "quota" in err_msg.lower():
-                            self._log("  -> Đã hết hạn mức (Quota). Vui lòng đổi Key hoặc chờ.")
+                            self._log("  -> Đã hết hạn mức. Dừng.")
                             self.running = False
                             break
-                        
-                        if q.qtype == "choice" and q.options:
-                            payloads.append({"stepId": q.id, "type": "choice", "optionId": q.options[0]["id"]})
-                        elif q.qtype == "true_false":
-                            payloads.append({"stepId": q.id, "type": "true_false", "choices": ["true"] * len(q.options)})
-                        else:
-                            payloads.append({"stepId": q.id, "type": "text", "text": "0"})
-                    
-                    self.after(0, lambda p=(i+1)/total, cur=i+1, tot=total: [
-                        self.progress.set(p),
-                        self.lbl_progress.configure(text=f"Tiến độ: {cur}/{tot} câu hỏi")
-                    ])
-                    
+                        if q.qtype == "choice" and q.options: payloads.append({"stepId": q.id, "type": "choice", "optionId": q.options[0]["id"]})
+                        elif q.qtype == "true_false": payloads.append({"stepId": q.id, "type": "true_false", "choices": ["true"] * len(q.options)})
+                        else: payloads.append({"stepId": q.id, "type": "text", "text": "0"})
+                    self.after(0, lambda p=(i+1)/total, cur=i+1, tot=total: [self.progress.set(p), self.lbl_progress.configure(text=f"Tiến độ: {cur}/{tot} câu hỏi")])
                     spent = time.time() - t0
-                    if delay_per_q > spent and self.running:
-                        time.sleep(delay_per_q - spent)
+                    if delay_per_q > spent and self.running: time.sleep(delay_per_q - spent)
                 
                 if self.running:
                     self._log("\n> Đang upload đáp án lên S3...")
                     if self.api.upload_answers(assign_id, payloads):
                         self._log("> Upload thành công!")
-                        
                         if sub_mode == "3":
-                            self._log("\n> [CHẾ ĐỘ] KHÔNG nộp bài. Đáp án đã lưu trên server.")
+                            self._log("\n> [CHẾ ĐỘ] KHÔNG nộp bài. Đáp án đã lưu.")
                             self.after(0, lambda: self.lbl_progress.configure(text="Hoàn tất (Chưa nộp)"))
                             return
-                            
                         wait_seconds = int(wait_mins * 60) if sub_mode == "2" else 0
-                        if sub_mode in ("1", "2") and wait_seconds < 180:
-                            wait_seconds = 180
-                            
+                        if sub_mode in ("1", "2") and wait_seconds < 180: wait_seconds = 180
                         if wait_seconds > 0:
-                            self._log(f"> Chờ {wait_seconds/60:.1f} phút trước khi nộp bài...")
+                            self._log(f"> Chờ {wait_seconds/60:.1f} phút trước khi nộp...")
                             for r in range(wait_seconds, 0, -1):
                                 if not self.running: break
                                 self.after(0, lambda rem=r: self.lbl_progress.configure(text=f"Đang chờ nộp bài: {rem//60:02d}:{rem%60:02d}..."))
                                 time.sleep(1)
-                                
                         if self.running:
                             self._log("> Đang nộp bài...")
                             self.after(0, lambda: self.lbl_progress.configure(text="Đang nộp bài..."))
@@ -777,22 +635,16 @@ class App(ctk.CTk):
                             if res["success"]: 
                                 self._log("🎉 NỘP BÀI THÀNH CÔNG!")
                                 self.after(0, lambda: self.lbl_progress.configure(text="Đã hoàn tất!"))
-                            else: 
-                                self._log(f"Lỗi nộp: {res.get('message')}")
-                                self.after(0, lambda: self.lbl_progress.configure(text="Lỗi khi nộp bài"))
-                    else:
-                        self._log("> Upload thất bại.")
-            except Exception as e:
-                self._log(f"\n[LỖI HỆ THỐNG]: {e}")
+                            else: self._log(f"Lỗi nộp: {res.get('message')}")
+                    else: self._log("> Upload thất bại.")
+            except Exception as e: self._log(f"\n[LỖI HỆ THỐNG]: {e}")
             finally:
                 self.after(0, lambda: self.btn_stop.configure(state="disabled"))
                 self.after(0, self._refresh_key_list)
                 self._save_config()
-                
         threading.Thread(target=task, daemon=True).start()
 
     def _update_timer(self):
-        """Hàm chạy ngầm cập nhật đồng hồ mỗi giây"""
         if not self.timer_running: return
         elapsed = int(time.time() - self.start_time)
         self.lbl_timer.configure(text=f"⏱️ {elapsed//60:02d}:{elapsed%60:02d}")
@@ -814,7 +666,6 @@ class App(ctk.CTk):
             self.after(0, lambda: self.log_detail_box.insert("end", msg))
             self.after(0, lambda: self.log_detail_box.see("end"))
 
-    # --- QUẢN LÝ TÀI KHOẢN ---
     def _show_account_manager(self):
         self.account_dialog = ctk.CTkToplevel(self)
         self.account_dialog.title("Quản lý tài khoản")
@@ -822,38 +673,29 @@ class App(ctk.CTk):
         self.account_dialog.configure(fg_color=BG)
         self.account_dialog.attributes("-topmost", True)
         self.account_dialog.grab_set()
-        
         self.account_dialog.update_idletasks()
         x = self.winfo_x() + (self.winfo_width() - self.account_dialog.winfo_width()) // 2
         y = self.winfo_y() + (self.winfo_height() - self.account_dialog.winfo_height()) // 2
         self.account_dialog.geometry(f"+{x}+{y}")
-
         self.acc_list_frame = ctk.CTkScrollableFrame(self.account_dialog, fg_color="transparent")
         self.acc_list_frame.pack(fill="both", expand=True, padx=20, pady=20)
-        
         self._render_saved_accounts()
 
     def _render_saved_accounts(self):
         self._clear_frame(self.acc_list_frame)
         accounts = self.api.get_saved_accounts()
-        
         for acc in accounts:
             card = ctk.CTkFrame(self.acc_list_frame, fg_color=CARD, corner_radius=8, border_width=1, border_color=BORDER)
             card.pack(fill="x", pady=5, padx=5)
-            
             name = acc.get("display_name") or acc.get("username")
             ctk.CTkLabel(card, text=name, font=("Segoe UI", 14, "bold"), text_color=TEXT_P).pack(side="left", padx=15, pady=10)
             ctk.CTkButton(card, text="Chọn", width=60, height=30, fg_color=ACCENT, command=lambda a=acc: self._switch_account(a)).pack(side="right", padx=10)
-            
         ctk.CTkButton(self.acc_list_frame, text="+ Thêm tài khoản", font=("Segoe UI", 14, "bold"), height=40, fg_color=SUCCESS, hover_color="#059669", command=self._add_new_account_ui).pack(fill="x", pady=20, padx=5)
 
     def _switch_account(self, acc):
         username = acc.get("username")
-        try:
-            password = base64.b64decode(acc.get("password")).decode()
-        except:
-            password = ""
-            
+        try: password = base64.b64decode(acc.get("password")).decode()
+        except: password = ""
         self.account_dialog.destroy()
         self.show_page("login")
         self.entry_user.delete(0, "end")

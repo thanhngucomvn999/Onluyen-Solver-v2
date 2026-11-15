@@ -2,6 +2,7 @@ import re
 import json
 import time
 import requests
+import urllib.parse
 from typing import List, Dict, Any
 
 class SolverError(Exception): pass
@@ -9,6 +10,16 @@ class SolverError(Exception): pass
 def clean_display_text(text: str) -> str:
     if not text: return ""
     return re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', text)).strip()
+
+# Bóc tách JSON an toàn
+def safe_parse_json(text: str) -> dict:
+    try:
+        match = re.search(r'\{[\s\S]*\}', text)
+        if match:
+            return json.loads(match.group(0))
+    except Exception:
+        pass
+    return {}
 
 class AISolver:
     def __init__(self, provider: str, api_key: str, model: str = "", rpd_limit: int = 1500):
@@ -21,9 +32,8 @@ class AISolver:
         self._session.headers.update({"User-Agent": "Onluyen-Solver/4.0"})
 
     def _get_default_model(self) -> str:
-        # Cập nhật danh sách model mới nhất
         defaults = {
-            "gemini": "gemini-3.8-flash", 
+            "gemini": "gemini-1.5-flash", 
             "groq": "llama-3.1-8b-instant",
             "openrouter": "google/gemma-2-9b-it:free",
             "mistral": "open-mistral-nemo",
@@ -42,7 +52,8 @@ class AISolver:
                 models = []
                 for m in resp.json().get("models", []):
                     name = m.get("name", "").replace("models/", "")
-                    if "flash" in name or "pro" in name: models.append(name)
+                    if "flash" in name and "tts" not in name and "vision" not in name:
+                        models.append(name)
                 models.sort(key=lambda x: 100 if "3.8" in x else (90 if "2.5" in x else 0), reverse=True)
                 return {"models": models[:15], "limits": {"rpm": 15, "rpd": 1500}}
             return {"models": [], "limits": {"rpm": 10, "rpd": 1000}}
@@ -62,7 +73,7 @@ class AISolver:
                 if models_info.get("models"):
                     self.model = models_info["models"][0]
                     return True, f"Đã tự động chuyển sang {self.model}"
-                return False, "Model không tồn tại và không tìm thấy thay thế."
+                return False, "Model không tồn tại."
             return False, f"Lỗi HTTP {resp.status_code}"
         except Exception as e: return False, str(e)
 
@@ -82,7 +93,7 @@ class AISolver:
                 resp = self._session.post(url, json=payload, timeout=60)
                 if resp.status_code == 200: return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
                 elif resp.status_code in (503, 429):
-                    time.sleep((attempt + 1) * 2)
+                    time.sleep((attempt + 1) * 3)
                     continue
                 elif resp.status_code == 404:
                     info = self.fetch_models_and_limits()
@@ -93,24 +104,8 @@ class AISolver:
                 else: raise SolverError(f"Gemini Error {resp.status_code}: {resp.text}")
             except requests.exceptions.RequestException as e:
                 if attempt == max_retries - 1: raise SolverError(f"Lỗi mạng: {str(e)}")
-                time.sleep((attempt + 1) * 2)
-        raise SolverError("Server AI quá tải (503). Vui lòng thử lại sau.")
-
-    def _parse_json_response(self, raw_text: str, qtype: str) -> Any:
-        raw_text = re.sub(r'```json\s*|\s*```', '', raw_text).strip()
-        try:
-            data = json.loads(raw_text)
-            if qtype == "choice":
-                ans = str(data.get("answer", "A")).upper()
-                return ans if ans in "ABCD" else "A"
-            elif qtype == "true_false": return [str(x).lower() for x in data.get("answers", [])]
-            else: return str(data.get("answer", "0")).strip()
-        except json.JSONDecodeError:
-            if qtype == "choice":
-                match = re.search(r'[A-D]', raw_text.upper())
-                return match.group(0) if match else "A"
-            elif qtype == "true_false": return [x for x in re.findall(r'true|false', raw_text.lower())]
-            else: return raw_text.split("\n")[-1].strip()[:50]
+                time.sleep((attempt + 1) * 3)
+        raise SolverError("Server AI quá tải (503).")
 
     def _get_images(self, html_content: str) -> List[str]:
         matches = re.findall(r'<img[^>]+src=["\'](data:image/[^;]+;base64,[^"\']+)["\']', html_content)
@@ -122,15 +117,27 @@ class AISolver:
         qtype, content = question.qtype, clean_display_text(question.content)
         images_b64 = self._get_images(question.content) if self.provider == "gemini" else []
             
-        role = "Bạn là giáo viên giỏi. Hãy phân tích cẩn thận."
+        role = "Bạn là một giáo viên giỏi giải bài tập chính xác tuyệt đối. Hãy phân tích cẩn thận."
+        
         if qtype == "choice":
             opts = "\n".join([f"{chr(65+i)}. {clean_display_text(o['text'])}" for i, o in enumerate(question.options)])
-            prompt = f"{role}\nCâu hỏi: {content}\n\nCác lựa chọn:\n{opts}\n\nHãy giải thích ngắn, sau đó trả về JSON: {{\"answer\": \"A\"}}"
+            prompt = f"{role}\nCâu hỏi: {content}\n\nCác lựa chọn:\n{opts}\n\nHãy giải thích ngắn gọn lý do, sau đó chỉ trả về JSON: {{\"answer\": \"<chữ_cái_đáp_án>\"}}"
+            
         elif qtype == "true_false":
             stmts = "\n".join([f"{i+1}. {clean_display_text(o['text'])}" for i, o in enumerate(question.options)])
-            prompt = f"{role}\nĐề bài: {content}\nCác nhận định:\n{stmts}\n\nTrả về JSON: {{\"answers\": [\"true\", \"false\"]}}"
+            prompt = f"{role}\nĐề bài: {content}\nCác nhận định:\n{stmts}\n\nTrả về JSON: {{\"answers\": [\"true\", \"false\", ...]}}"
+            
         else:
-            prompt = f"{role}\nGiải bài sau và đưa ra đáp số: {content}\nTrả về JSON: {{\"answer\": \"đáp số\"}}"
+            # NÂNG CẤP SHORT ANSWER: Ép AI suy luận và đổi dấu chấm thành dấu phẩy
+            prompt = (
+                f"{role}\n"
+                f"Đề bài: {content}\n\n"
+                f"YÊU CẦU BẮT BUỘC:\n"
+                f"1. Hãy suy luận từng bước để tìm ra đáp số cuối cùng.\n"
+                f"2. Nếu đáp số là số thập phân, BẮT BUỘC sử dụng dấu phẩy (,) thay vì dấu chấm (.). Ví dụ: 3.14 phải viết là 3,14.\n"
+                f"3. Không bao gồm đơn vị đo lường (kg, m, cm...).\n"
+                f"4. Chỉ trả về JSON duy nhất: {{\"answer\": \"<đáp_số>\"}}"
+            )
 
         try:
             if self.provider == "gemini": raw = self._call_gemini(prompt, images_b64)
@@ -143,22 +150,37 @@ class AISolver:
                 resp = self._session.post(url, headers={"Authorization": f"Bearer {self.api_key}"}, json={"model": self.model or self._get_default_model(), "messages": [{"role": "user", "content": prompt}], "temperature": 0.1}, timeout=45)
                 raw = resp.json()["choices"][0]["message"]["content"]
 
-            ai_answer = self._parse_json_response(raw, qtype)
+            json_ans = safe_parse_json(raw)
             self.used_today += 1
+            
         except Exception as e:
             raise SolverError(str(e))
 
+        # XỬ LÝ KẾT QUẢ TRẢ VỀ
         if qtype == "choice":
-            idx = ord(ai_answer) - ord('A')
+            ans_letter = str(json_ans.get("answer", "A")).upper()
+            # Fallback nếu AI trả lời lan man
+            if len(ans_letter) > 1:
+                match = re.search(r'[A-D]', raw.upper())
+                ans_letter = match.group(0) if match else "A"
+                
+            idx = ord(ans_letter) - ord('A')
             opt_id = question.options[idx]["id"] if idx < len(question.options) else question.options[0]["id"]
             return {"stepId": question.id, "type": "choice", "optionId": opt_id}
+            
         elif qtype == "true_false":
-            while len(ai_answer) < len(question.options): ai_answer.append("true")
-            return {"stepId": question.id, "type": "true_false", "choices": ai_answer[:len(question.options)]}
-        else: return {"stepId": question.id, "type": "text", "text": ai_answer}
+            arr = json_ans.get("answers", [])
+            if not isinstance(arr, list): arr = []
+            while len(arr) < len(question.options): arr.append("false")
+            return {"stepId": question.id, "type": "true_false", "choices": [str(x).lower() for x in arr[:len(question.options)]]}
+            
+        else:
+            ans_text = str(json_ans.get("answer", "0")).strip()
+            # TỰ ĐỘNG ĐỔI DẤU CHẤM THÀNH DẤU PHẨY (Ví dụ: 3.14 -> 3,14)
+            ans_text = re.sub(r'(\d)\.(\d)', r'\1,\2', ans_text)
+            return {"stepId": question.id, "type": "text", "text": ans_text}
 
     def _solve_jev(self, question: Any) -> Dict[str, Any]:
-        import urllib.parse
         def _q(labels, text):
             url = f"https://classifier.dev/{','.join(labels)}/{urllib.parse.quote(text[:800], safe='')}"
             try:
