@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+curls.txt
+venv/
+.venv/
+.DS_Store
+*.log
+
+# Dữ liệu người dùng (Không được up lên)
+.ai_config.json
+.onluyen_session.json
+.onluyen_accounts.json
+api_keys.json
+images_cache/
+result_*.json
